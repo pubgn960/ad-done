@@ -357,22 +357,78 @@ class TestBotSettingsCache(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(BOT_SETTINGS["delivery_group_id"])
 
 
-class TestKeywordDetector(unittest.TestCase):
-    """Tests keyword-based order detection."""
+from keywords import contains_order_keyword, normalize_cp_text
 
-    def test_keyword_matches(self):
-        # Match cases
+
+class TestKeywordDetector(unittest.TestCase):
+    """Tests keyword-based and CP package-based order detection."""
+
+    def test_cp_package_variations(self):
+        # 1. 12000 CP
+        matched, info = contains_order_keyword("12000 CP")
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+
+        # 2. 12000CP
+        matched, info = contains_order_keyword("12000CP")
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+
+        # 3. 12,000 CP
+        matched, info = contains_order_keyword("12,000 CP")
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+
+        # 4. 12k CP and 12K cp
+        matched, info = contains_order_keyword("12k CP")
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+
+        matched, info = contains_order_keyword("12K cp")
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+
+    def test_full_login_password_nickname_message(self):
+        # 5. Full Login + Password + Nickname + 12000 CP message
+        full_msg = (
+            "Login\n\n"
+            "influge1taa@mail.ru\n\n"
+            "Password\n\n"
+            "vikafell2006\n\n"
+            "Nickname\n\n"
+            "cuttmyheadD^_<\n\n"
+            "12000 CP"
+        )
+        matched, info = contains_order_keyword(full_msg)
+        self.assertTrue(matched)
+        self.assertEqual(info, "cp_package:12000")
+        self.assertEqual(extract_email(full_msg), "influge1taa@mail.ru")
+        self.assertEqual(extract_package(full_msg), "12000 CP")
+
+    def test_existing_order_formats(self):
+        # 6. Existing order formats
         self.assertTrue(contains_order_keyword("10800 CP\nabc@gmail.com")[0])
         self.assertTrue(contains_order_keyword("Login:\ntest@hotmail.com")[0])
         self.assertTrue(contains_order_keyword("UID:\n123456\nEmail:\nabc@outlook.com")[0])
         self.assertTrue(contains_order_keyword("Login: test+1234")[0])
         self.assertTrue(contains_order_keyword("myemail@yahoo.co.pk")[0])
 
+    def test_random_number_not_order(self):
+        # 7. Random message containing 12345 — should NOT become an order if 12345 is not a configured package
+        matched, info = contains_order_keyword("Hello user 12345 report")
+        self.assertFalse(matched)
+
+    def test_unknown_cp_package_workflow(self):
+        # 8. Unknown CP package — should follow existing workflow rather than being silently ignored
+        matched, info = contains_order_keyword("12345 CP")
+        self.assertTrue(matched)
+        self.assertEqual(info, "unknown_cp_package:12345")
+        self.assertEqual(extract_package("12345 CP"), "12345 CP")
+
     def test_keyword_ignores(self):
-        # Ignore cases
+        # Random non-order text
         self.assertFalse(contains_order_keyword("Need CP")[0])
         self.assertFalse(contains_order_keyword("Hello")[0])
-        self.assertFalse(contains_order_keyword("10800 CP")[0])
 
 
 class TestEmailOrderPackageParser(unittest.TestCase):
@@ -391,6 +447,23 @@ class TestEmailOrderPackageParser(unittest.TestCase):
     def test_extract_package_description(self):
         text = "10800 CP\nEmail: test@gmail.com"
         self.assertEqual(extract_package(text), "10800 CP")
+
+        full_msg = (
+            "Login\n\n"
+            "influge1taa@mail.ru\n\n"
+            "Password\n\n"
+            "vikafell2006\n\n"
+            "Nickname\n\n"
+            "cuttmyheadD^_<\n\n"
+            "12000 CP"
+        )
+        self.assertEqual(extract_package(full_msg), "12000 CP")
+
+    def test_normalization_helper(self):
+        self.assertEqual(normalize_cp_text("12,000 CP"), "12000 CP")
+        self.assertEqual(normalize_cp_text("12000CP"), "12000 CP")
+        self.assertEqual(normalize_cp_text("12k CP"), "12000 CP")
+        self.assertEqual(normalize_cp_text("12K cp"), "12000 CP")
 
 
 class TestDeliverySplitting(unittest.TestCase):
@@ -417,6 +490,7 @@ class TestTwoGroupDatabaseWorkflow(unittest.IsolatedAsyncioTestCase):
 
         # 1. Customer Order Creation in Client Group
         email = "twogroup_flow@example.com"
+        await delete_orders_by_email(email)
         order = await create_order(
             email=email,
             client_chat_id=-1001111111111,

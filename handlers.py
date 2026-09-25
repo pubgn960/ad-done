@@ -94,6 +94,23 @@ LOADER_ADD_SESSION: Dict[int, Dict[str, Any]] = {}
 # Temporary memory state for interactive price input workflow (order_id -> session dict)
 PRICE_INPUT_SESSION: Dict[int, Dict[str, Any]] = {}
 
+# Cache for deduplicating status warning reply messages per media group (album)
+WARNED_MEDIA_GROUPS: Dict[str, bool] = {}
+
+
+def should_suppress_media_group_warning(order_id: int, media_group_id: Optional[str], status: str) -> bool:
+    """Returns True if a status warning reply has already been sent for this media group album."""
+    if not media_group_id:
+        return False
+    key = f"{order_id}_{media_group_id}_{status}"
+    if key in WARNED_MEDIA_GROUPS:
+        return True
+    WARNED_MEDIA_GROUPS[key] = True
+    if len(WARNED_MEDIA_GROUPS) > 1000:
+        first_key = next(iter(WARNED_MEDIA_GROUPS))
+        WARNED_MEDIA_GROUPS.pop(first_key, None)
+    return False
+
 
 def is_valid_price_string(text: str) -> bool:
     """Validates price string: exact numeric integers or decimals only (e.g. 15, 15.5, 2500, 2999.99)."""
@@ -124,7 +141,15 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     is_client_group = (chat.id == BOT_SETTINGS["source_group_id"]) or (chat.id in CLIENT_GROUPS_CACHE)
 
     if not is_client_group:
-        logger.warning(f"[CLIENT] Client Group is not configured yet. Ignored message in chat {chat.id} ({chat.title}).")
+        # Check if chat is a known Loader Group to avoid false warning logs
+        is_known_loader = (chat.id == BOT_SETTINGS["delivery_group_id"]) or any(
+            l["group_id"] == chat.id for l in LOADERS_CACHE.values()
+        )
+        if is_known_loader:
+            logger.debug(f"[CLIENT] Message in Loader Group {chat.id} ({chat.title}) ignored by Client Group handler.")
+            return
+
+        logger.debug(f"[CLIENT] Chat {chat.id} ({chat.title}) is not a registered Client Group. Ignored.")
         return
 
     # Ignore Super Admin & Delivery User Messages in Client Group
@@ -142,16 +167,26 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.debug(f"[CLIENT] Message {message.message_id} in Client Group has no text/caption content.")
         return
 
-    # Keyword-Based Order Detection
-    matched, keyword = contains_order_keyword(text_content)
+    # Keyword & CP Package-Based Order Detection
+    matched, match_info = contains_order_keyword(text_content)
     if not matched:
         logger.info("[DETECTOR] No keyword found. Message ignored.")
         return
 
-    logger.info(f"[DETECTOR] Keyword matched: {keyword}")
+    if match_info and match_info.startswith("cp_package:"):
+        pkg_val = match_info.split(":", 1)[1]
+        logger.info(f"[DETECTOR] Known CP package detected: {pkg_val}")
+        logger.info("[DETECTOR] Order detected from CP package")
+    elif match_info and match_info.startswith("unknown_cp_package:"):
+        pkg_val = match_info.split(":", 1)[1]
+        logger.info(f"[DETECTOR] Unknown CP package detected: {pkg_val}")
+        logger.info("[DETECTOR] Order detected from CP package")
+    else:
+        logger.info(f"[DETECTOR] Keyword matched: {match_info}")
 
     email = extract_email(text_content) or f"order_{message.message_id}@customer.com"
     package_desc = extract_package(text_content)
+    logger.info(f"[PARSER] Package: {package_desc}")
 
     # Determine Group Category ('A' or 'B')
     category = CLIENT_GROUPS_CACHE.get(chat.id, "A")
@@ -982,6 +1017,11 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Rule 3: Check Order Status (Duplicate Protection & State Check)
+    if order.status in ("Delivered", "Cancelled", "Expired"):
+        if should_suppress_media_group_warning(order.id, message.media_group_id, order.status):
+            logger.info(f"[LOADER] Duplicate media group status warning suppressed for Order #{order.id} ({order.status}).")
+            return
+
     if order.status == "Delivered":
         logger.info(f"[LOADER] Duplicate reply detected: Order #{order.id} is already Delivered.")
         try:

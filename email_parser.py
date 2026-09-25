@@ -96,9 +96,17 @@ def extract_order_id(text: Optional[str]) -> Optional[int]:
     return None
 
 
+HEADER_KEYWORDS = {
+    "login", "password", "pass", "nickname", "nick", "email",
+    "uid", "id", "user", "username", "account", "credentials",
+    "wallet", "address", "network"
+}
+
+
 def extract_package(text: Optional[str]) -> str:
     """
-    Extracts package/item description from customer message by stripping email line.
+    Extracts package/item description from customer message.
+    Normalizes text and prioritizes explicit or known CP package detection.
 
     Args:
         text (str, optional): Input order message text.
@@ -109,18 +117,47 @@ def extract_package(text: Optional[str]) -> str:
     if not text:
         return "Standard Package"
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    package_lines = []
+    from keywords import normalize_cp_text
+    from config import Config
 
+    normalized = normalize_cp_text(text)
+
+    # 1. Search for explicit CP package match (e.g. "12000 CP", "12345 CP")
+    cp_match = re.search(r'\b(\d+)\s*CP\b', normalized, re.IGNORECASE)
+    if cp_match:
+        return f"{cp_match.group(1)} CP"
+
+    # 2. Search for known CP package number in text (e.g. 12000, 10800, 5000)
+    for num_str in re.findall(r'\b(\d+)\b', normalized):
+        try:
+            val = int(num_str)
+            if val in Config.KNOWN_CP_PACKAGES:
+                return f"{val} CP"
+        except ValueError:
+            pass
+
+    # 3. Look for explicit package header lines (e.g. "Package: ...", "Item: ...")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     for line in lines:
         if EMAIL_REGEX.search(line):
             continue
-        if line.lower().startswith(("package:", "item:", "order:")):
-            package_lines.append(line.split(":", 1)[-1].strip())
-        else:
-            package_lines.append(line)
+        line_lower = line.lower()
+        if line_lower.startswith(("package:", "item:", "order:")):
+            val = line.split(":", 1)[-1].strip()
+            if val:
+                return val
 
-    if package_lines:
-        return " | ".join(package_lines[:2])
+    # 4. Filter out email lines and credential header lines
+    candidate_lines = []
+    for line in lines:
+        if EMAIL_REGEX.search(line):
+            continue
+        clean_word = line.lower().rstrip(":")
+        if clean_word in HEADER_KEYWORDS:
+            continue
+        candidate_lines.append(line)
+
+    if candidate_lines:
+        return " | ".join(candidate_lines[:2])
 
     return "Standard Package"

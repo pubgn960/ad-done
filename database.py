@@ -715,9 +715,10 @@ async def get_order_by_loader_msg_id(loader_msg_id: int) -> Optional[Order]:
             select(Order)
             .options(joinedload(Order.images))
             .where(Order.loader_message_id == loader_msg_id)
+            .order_by(Order.created_at.desc())
         )
         res = await session.execute(stmt)
-        return res.unique().scalar_one_or_none()
+        return res.unique().scalars().first()
 
 
 async def add_images_to_order(
@@ -776,7 +777,7 @@ async def add_images_to_order(
         await session.commit()
 
         res = await session.execute(
-            select(Order).options(joinedload(Order.images)).where(Order.id == order_id)
+            select(Order).options(joinedload(Order.images)).execution_options(populate_existing=True).where(Order.id == order_id)
         )
         updated_order = res.unique().scalar_one()
 
@@ -885,6 +886,8 @@ async def delete_orders_by_email(email: str) -> int:
         if not ids:
             return 0
 
+        # Delete associated images first to ensure clean cascade in SQLite
+        await session.execute(delete(Image).where(Image.order_id.in_(ids)))
         del_stmt = delete(Order).where(Order.id.in_(ids))
         result = await session.execute(del_stmt)
         await session.commit()

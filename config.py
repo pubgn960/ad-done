@@ -39,6 +39,9 @@ def safe_float(env_name: str, default: float) -> float:
         return default
 
 
+DEFAULT_KNOWN_CP_PACKAGES: Set[int] = {80, 160, 240, 320, 420, 880, 2400, 5000, 10800, 12000, 24000, 36000, 48000, 60000}
+
+
 class Config:
     """Validated Application Configuration."""
 
@@ -47,6 +50,10 @@ class Config:
     RAW_ADMIN_IDS: str = os.getenv("ADMIN_IDS", "")
     ADMIN_IDS: Set[int] = set()
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///bot_database.db")
+
+    # Known CODM CP Package Sizes (Set of integers)
+    RAW_KNOWN_CP_PACKAGES: str = os.getenv("KNOWN_CP_PACKAGES", "")
+    KNOWN_CP_PACKAGES: Set[int] = DEFAULT_KNOWN_CP_PACKAGES.copy()
 
     # Fixed Payment Review Group Chat ID (-1004441603990)
     PAYMENT_REVIEW_GROUP_ID: int = safe_int("PAYMENT_REVIEW_GROUP_ID", -1004441603990)
@@ -80,6 +87,19 @@ class Config:
         cls.RETRY_DELAY = safe_float("RETRY_DELAY", 2.0)
         cls.CLEANUP_DAYS = safe_int("CLEANUP_DAYS", 30)
         cls.DELETE_AFTER_DELIVERY = os.getenv("DELETE_AFTER_DELIVERY", "false").lower() in ("true", "1", "yes")
+
+        # Parse Known CP Packages from env if set
+        cls.RAW_KNOWN_CP_PACKAGES = os.getenv("KNOWN_CP_PACKAGES", "")
+        if cls.RAW_KNOWN_CP_PACKAGES:
+            try:
+                cleaned = cls.RAW_KNOWN_CP_PACKAGES.replace(",", " ").replace(";", " ")
+                parsed = {int(x.strip()) for x in cleaned.split() if x.strip().isdigit()}
+                if parsed:
+                    cls.KNOWN_CP_PACKAGES = parsed
+            except Exception as e:
+                logger.error(f"Error parsing KNOWN_CP_PACKAGES: {e}")
+        else:
+            cls.KNOWN_CP_PACKAGES = DEFAULT_KNOWN_CP_PACKAGES.copy()
 
         # Parse Admin IDs
         if cls.RAW_ADMIN_IDS:
