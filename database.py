@@ -81,11 +81,19 @@ async def init_db() -> None:
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        try:
+
+    # Safely migrate settings table for existing installations (PostgreSQL & SQLite compatibility)
+    try:
+        async with engine.begin() as conn:
             from sqlalchemy import text
-            await conn.execute(text("ALTER TABLE settings ADD COLUMN is_active BOOLEAN DEFAULT 1"))
-        except Exception:
-            pass
+            db_url = str(engine.url).lower()
+            if "postgres" in db_url:
+                await conn.execute(text("ALTER TABLE settings ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;"))
+            else:
+                await conn.execute(text("ALTER TABLE settings ADD COLUMN is_active BOOLEAN DEFAULT TRUE;"))
+    except Exception as e:
+        logger.debug(f"Schema migration note for is_active column: {e}")
+
     logger.info("Database initialized successfully.")
 
     await get_or_create_settings()
