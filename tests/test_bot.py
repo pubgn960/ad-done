@@ -62,7 +62,8 @@ from database import (
     get_or_create_settings,
     update_source_group,
     update_delivery_group,
-    reset_groups
+    reset_groups,
+    set_bot_active_status
 )
 
 
@@ -540,6 +541,34 @@ class TestTwoGroupDatabaseWorkflow(unittest.IsolatedAsyncioTestCase):
         # Clean up
         await delete_orders_by_email(email)
         await delete_orders_by_email("cancel_test@example.com")
+
+
+class TestMasterBotOnOff(unittest.IsolatedAsyncioTestCase):
+    """Tests Master Bot ON/OFF toggle state persistence and cache synchronization."""
+
+    async def test_bot_active_toggle(self):
+        await init_db()
+
+        # Initial state should be active (True)
+        self.assertTrue(BOT_SETTINGS["is_active"])
+
+        # Turn OFF
+        s_off = await set_bot_active_status(False)
+        self.assertFalse(s_off.is_active)
+        self.assertFalse(BOT_SETTINGS["is_active"])
+
+        # Verify cache reload maintains OFF state
+        cached = await reload_bot_settings_cache()
+        self.assertFalse(cached["is_active"])
+
+        # Turn back ON
+        s_on = await set_bot_active_status(True)
+        self.assertTrue(s_on.is_active)
+        self.assertTrue(BOT_SETTINGS["is_active"])
+
+        # Verify cache reload maintains ON state
+        cached_on = await reload_bot_settings_cache()
+        self.assertTrue(cached_on["is_active"])
 
 
 if __name__ == "__main__":

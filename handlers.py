@@ -71,7 +71,8 @@ from database import (
     add_loader,
     remove_loader_by_id,
     get_all_loaders,
-    reload_loaders_cache
+    reload_loaders_cache,
+    set_bot_active_status
 )
 from models import Order
 from utils import (
@@ -150,6 +151,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         logger.debug(f"[CLIENT] Chat {chat.id} ({chat.title}) is not a registered Client Group. Ignored.")
+        return
+
+    # Check master Bot ON/OFF state
+    if not BOT_SETTINGS.get("is_active", True):
+        logger.info(f"[CLIENT] Bot is currently turned OFF. Message in chat {chat.id} ignored.")
         return
 
     # Ignore Super Admin & Delivery User Messages in Client Group
@@ -1589,9 +1595,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if settings.delivery_group_id:
         del_str += f" ({settings.delivery_group_id})"
 
+    active_status_str = "🟢 ACTIVE" if BOT_SETTINGS.get("is_active", True) else "🔴 PAUSED (OFF)"
+
     msg = (
         "🤖 <b>Bot Status</b>\n\n"
-        f"<b>Status:</b> Online\n"
+        f"<b>Status:</b> Online ({active_status_str})\n"
         f"<b>Database:</b> Connected ({get_db_type_name()})\n"
         f"<b>Client Group:</b> {src_str}\n"
         f"<b>Loader Group:</b> {del_str}\n"
@@ -1602,6 +1610,30 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"<b>Uptime:</b> {get_uptime_str()}"
     )
     await update.effective_message.reply_text(msg, parse_mode="HTML")
+
+
+async def turn_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /on or /turnon command to enable order detection."""
+    if not await check_admin_permission(update):
+        return
+
+    await set_bot_active_status(True)
+    await update.effective_message.reply_text(
+        "🟢 <b>Bot is now TURNED ON</b>\n\nOrder detection and message processing are active.",
+        parse_mode="HTML"
+    )
+
+
+async def turn_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /off or /turnoff command to disable order detection."""
+    if not await check_admin_permission(update):
+        return
+
+    await set_bot_active_status(False)
+    await update.effective_message.reply_text(
+        "🔴 <b>Bot is now TURNED OFF</b>\n\nOrder detection and message processing are paused.",
+        parse_mode="HTML"
+    )
 
 
 async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

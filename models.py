@@ -7,7 +7,7 @@ Multi Loader Approval System, and Category A Only Price Workflow with prompt & c
 
 from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Index
+from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Index, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -23,6 +23,7 @@ class Settings(Base):
     source_group_id: Client Group ID (where customers send orders)
     delivery_group_id: Loader Group ID (where bot forwards orders & loaders reply)
     payment_review_group_id: Payment Review Group ID (for Category B orders)
+    is_active: Master Bot ON/OFF state (default True)
     """
 
     __tablename__ = "settings"
@@ -34,6 +35,7 @@ class Settings(Base):
     delivery_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     payment_review_group_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payment_review_group_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -42,7 +44,7 @@ class Settings(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Settings(id={self.id}, client_group={self.source_group_id}, loader_group={self.delivery_group_id}, payment_group={self.payment_review_group_id})>"
+        return f"<Settings(id={self.id}, active={self.is_active}, client_group={self.source_group_id}, loader_group={self.delivery_group_id}, payment_group={self.payment_review_group_id})>"
 
 
 class ClientGroup(Base):

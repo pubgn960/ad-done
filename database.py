@@ -44,7 +44,8 @@ BOT_SETTINGS: Dict[str, Any] = {
     "payment_review_group_id": Config.PAYMENT_REVIEW_GROUP_ID,
     "source_group_title": None,
     "delivery_group_title": None,
-    "payment_review_group_title": "Payment Review Group"
+    "payment_review_group_title": "Payment Review Group",
+    "is_active": True
 }
 
 # Global in-memory user permission cache: telegram_user_id -> role ('admin' or 'delivery')
@@ -80,6 +81,11 @@ async def init_db() -> None:
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE settings ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+        except Exception:
+            pass
     logger.info("Database initialized successfully.")
 
     await get_or_create_settings()
@@ -108,6 +114,7 @@ async def get_or_create_settings() -> Settings:
                 delivery_group_title=None,
                 payment_review_group_id=Config.PAYMENT_REVIEW_GROUP_ID,
                 payment_review_group_title="Payment Review Group",
+                is_active=True,
                 updated_at=datetime.now(timezone.utc)
             )
             session.add(settings)
@@ -123,6 +130,41 @@ async def get_current_settings() -> Settings:
     return await get_or_create_settings()
 
 
+async def set_bot_active_status(active: bool) -> Settings:
+    """
+    Updates the bot's master active status (is_active: True/False) in the database,
+    commits, and immediately reloads the global BOT_SETTINGS cache.
+    """
+    logger.info(f"[SETTINGS] Updating Bot Active Status: {active}")
+    async with AsyncSessionLocal() as session:
+        stmt = select(Settings).where(Settings.id == 1)
+        res = await session.execute(stmt)
+        settings = res.scalar_one_or_none()
+
+        if not settings:
+            settings = Settings(
+                id=1,
+                source_group_id=None,
+                source_group_title=None,
+                delivery_group_id=None,
+                delivery_group_title=None,
+                payment_review_group_id=Config.PAYMENT_REVIEW_GROUP_ID,
+                payment_review_group_title="Payment Review Group",
+                is_active=active,
+                updated_at=datetime.now(timezone.utc)
+            )
+            session.add(settings)
+        else:
+            settings.is_active = active
+            settings.updated_at = datetime.now(timezone.utc)
+
+        await session.commit()
+        logger.info("[SETTINGS] Database commit successful.")
+
+    await reload_bot_settings_cache()
+    return settings
+
+
 async def reload_bot_settings_cache() -> Dict[str, Any]:
     """
     Loads Settings and ClientGroups records from database once and populates global in-memory caches.
@@ -135,6 +177,8 @@ async def reload_bot_settings_cache() -> Dict[str, Any]:
     BOT_SETTINGS["source_group_title"] = settings.source_group_title
     BOT_SETTINGS["delivery_group_title"] = settings.delivery_group_title
     BOT_SETTINGS["payment_review_group_title"] = getattr(settings, "payment_review_group_title", None) or "Payment Review Group"
+    is_act = getattr(settings, "is_active", True)
+    BOT_SETTINGS["is_active"] = True if is_act is None else bool(is_act)
 
     # Pre-load Client Groups into CLIENT_GROUPS_CACHE in RAM
     async with AsyncSessionLocal() as session:
@@ -161,6 +205,7 @@ async def reload_bot_settings_cache() -> Dict[str, Any]:
     if pay_id:
         logger.info(f"[CACHE] Payment Review Group Loaded: {pay_id}")
     logger.info(f"[CACHE] Loaded {len(CLIENT_GROUPS_CACHE)} Client Group Category mapping(s) into memory.")
+    logger.info(f"[CACHE] Bot Active Status: {BOT_SETTINGS['is_active']}")
 
     return BOT_SETTINGS
 
