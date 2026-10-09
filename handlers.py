@@ -27,7 +27,7 @@ from telegram.error import TelegramError
 from sqlalchemy import update as update_sql, select
 
 from config import Config
-from keywords import contains_order_keyword
+from keywords import contains_order_keyword, is_calculation_summary
 from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
@@ -171,6 +171,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     text_content = message.text or message.caption or ""
     if not text_content:
         logger.debug(f"[CLIENT] Message {message.message_id} in Client Group has no text/caption content.")
+        return
+
+    # Filter out calculation summary messages (e.g. accounting bot updates)
+    if is_calculation_summary(text_content):
+        logger.info(f"[CLIENT] Calculation summary message ignored. Message ID: {message.message_id}")
         return
 
     # Keyword & CP Package-Based Order Detection
@@ -343,6 +348,11 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     user_id = user.id if user else None
     if user_id and (is_super_admin(user_id) or is_delivery_user(user_id)):
+        return
+
+    text_content = message.text or message.caption or ""
+    if is_calculation_summary(text_content):
+        logger.info(f"[CLIENT] Calculation summary edited message ignored. Message ID: {message.message_id}")
         return
 
     logger.info(f"[CLIENT] Customer edited message {message.message_id} in Client Group {chat.id}.")
@@ -956,6 +966,12 @@ async def delivery_group_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if not is_known_loader:
         logger.debug(f"[LOADER] Ignored message in unconfigured chat {chat.id} ({chat.title}).")
+        return
+
+    # Filter out calculation summary messages (e.g. accounting bot updates)
+    text_content = message.text or message.caption or ""
+    if is_calculation_summary(text_content):
+        logger.info(f"[LOADER] Calculation summary message ignored in Loader Group. Message ID: {message.message_id}")
         return
 
     # Role-Based Permission Check for Delivery Users

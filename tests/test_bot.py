@@ -17,7 +17,7 @@ import asyncio
 from telegram import BotCommand
 
 from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
-from keywords import contains_order_keyword
+from keywords import contains_order_keyword, is_calculation_summary
 from delivery import chunk_list
 from media_collector import user_session_manager
 from utils import is_super_admin, is_delivery_user
@@ -569,6 +569,66 @@ class TestMasterBotOnOff(unittest.IsolatedAsyncioTestCase):
         # Verify cache reload maintains ON state
         cached_on = await reload_bot_settings_cache()
         self.assertTrue(cached_on["is_active"])
+
+
+class TestCalculationSummaryFilter(unittest.TestCase):
+    """Tests Calculation Summary Filter for ignoring accounting bot calculation messages."""
+
+    def test_complete_calculation_summary_ignored(self):
+        msg = "Previous Total: 1321.00\nAdded: 34.50\nNew Total: 1355.50"
+        self.assertTrue(is_calculation_summary(msg))
+        matched, _ = contains_order_keyword(msg)
+        self.assertFalse(matched)
+
+    def test_different_capitalization_and_whitespace(self):
+        msg1 = "previous total: 1321 | added: 34.50 | new total: 1355.50"
+        msg2 = "Previous Total: 100 Added: 25 New Total: 125"
+        msg3 = "PREVIOUS TOTAL: 500.00 ADDED: 50.00 NEW TOTAL: 550.00"
+
+        for m in [msg1, msg2, msg3]:
+            self.assertTrue(is_calculation_summary(m))
+            matched, _ = contains_order_keyword(m)
+            self.assertFalse(matched)
+
+    def test_multiline_calculation_fields_ignored(self):
+        msg = "Prev Total: 1000.00\n\nAdded: 250.00\n\nNew Total: 1250.00"
+        self.assertTrue(is_calculation_summary(msg))
+        matched, _ = contains_order_keyword(msg)
+        self.assertFalse(matched)
+
+    def test_genuine_codm_order_with_email_and_cp_detected(self):
+        msg = "Login\ninfluge1taa@mail.ru\nPassword\nvikafell2006\nNickname\ncuttmyheadD^_<\n12000 CP"
+        self.assertFalse(is_calculation_summary(msg))
+        matched, match_info = contains_order_keyword(msg)
+        self.assertTrue(matched)
+
+    def test_genuine_order_with_numbers_and_prices_not_ignored(self):
+        msg = "Login: email@example.com\nPassword: 123456\nNickname: PlayerName\n12000 CP\nPrice: 5000 PKR"
+        self.assertFalse(is_calculation_summary(msg))
+        matched, match_info = contains_order_keyword(msg)
+        self.assertTrue(matched)
+
+
+class TestCalculationSummaryHandlers(unittest.IsolatedAsyncioTestCase):
+    """Tests handler behavior for calculation summary messages."""
+
+    async def test_calculation_message_ignored_without_db_or_notice(self):
+        await init_db()
+
+        # Calculation summary text containing numbers that might match CP packages (e.g. 100, 2400)
+        calc_msg_text = "Previous Total: 100\nAdded: 2300\nNew Total: 2400"
+
+        # Verify keywords detector rejects it
+        matched, _ = contains_order_keyword(calc_msg_text)
+        self.assertFalse(matched)
+
+        # Verify no pending order exists in DB for calc text
+        pending_before = await get_pending_orders()
+        self.assertTrue(is_calculation_summary(calc_msg_text))
+
+        # Ensure pending order count remains unchanged
+        pending_after = await get_pending_orders()
+        self.assertEqual(len(pending_before), len(pending_after))
 
 
 if __name__ == "__main__":

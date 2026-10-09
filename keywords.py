@@ -67,14 +67,38 @@ def normalize_cp_text(text: Optional[str]) -> str:
     return normalized
 
 
+def is_calculation_summary(text: Optional[str]) -> bool:
+    """
+    Detects if a message is a calculation summary message (e.g. balance/accounting updates posted by another bot).
+    Filters out messages containing patterns such as 'Previous Total:', 'Added:', and 'New Total:'
+    with flexible spacing, punctuation, and newlines.
+    """
+    if not text:
+        return False
+
+    text_lower = text.lower()
+
+    # Search for key calculation summary field patterns
+    has_prev_total = bool(re.search(r'\bprev(?:ious)?\s*total', text_lower))
+    has_added = bool(re.search(r'\badded\b', text_lower))
+    has_new_total = bool(re.search(r'\bnew\s*total', text_lower))
+
+    # Match when all 3 calculation summary fields are present, OR when prev_total + new_total are present
+    if (has_prev_total and has_added and has_new_total) or (has_prev_total and has_new_total):
+        return True
+
+    return False
+
+
 def contains_order_keyword(text: Optional[str]) -> Tuple[bool, Optional[str]]:
     """
     Evaluates message text or caption for order detection.
     Detection Priority:
-    1. Parse and normalize text.
-    2. Check for explicit or numeric CP packages matching configured Config.KNOWN_CP_PACKAGES.
-    3. Check for explicit CP suffix (e.g. '12345 CP') for unknown CP packages.
-    4. Check for traditional order keywords (e.g. '.com', 'gmail', etc.).
+    1. Filter out calculation summary messages.
+    2. Parse and normalize text.
+    3. Check for explicit or numeric CP packages matching configured Config.KNOWN_CP_PACKAGES.
+    4. Check for explicit CP suffix (e.g. '12345 CP') for unknown CP packages.
+    5. Check for traditional order keywords (e.g. '.com', 'gmail', etc.).
 
     Args:
         text (Optional[str]): Message text, photo caption, or document caption.
@@ -83,6 +107,9 @@ def contains_order_keyword(text: Optional[str]) -> Tuple[bool, Optional[str]]:
         Tuple[bool, Optional[str]]: (is_matched, match_info_or_keyword)
     """
     if not text:
+        return False, None
+
+    if is_calculation_summary(text):
         return False, None
 
     normalized = normalize_cp_text(text)
