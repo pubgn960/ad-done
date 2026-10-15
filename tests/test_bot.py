@@ -631,5 +631,29 @@ class TestCalculationSummaryHandlers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pending_before), len(pending_after))
 
 
+class TestBotOriginatedOrders(unittest.TestCase):
+    """Order formats posted by other bots (e.g. 'Fast Recharge' bot)."""
+
+    BOT_ORDERS = [
+        "Fast Recharge 32\nEmail: player123@gmail.com\nPass: abc12345\n5000cp\nActivision",
+        "Fast Recharge 32\nEmail:player123@gmail.com\nPass:abc12345\n5000CP\nActivision",
+        "Fast Recharge 32 Email: player123@gmail.com Pass: abc12345 5000 CP Activision",
+    ]
+
+    def test_bot_order_formats_detected_and_parsed(self):
+        for msg in self.BOT_ORDERS:
+            self.assertFalse(is_calculation_summary(msg))
+            matched, info = contains_order_keyword(msg)
+            self.assertTrue(matched, msg)
+            self.assertEqual(info, "cp_package:5000")
+            self.assertEqual(extract_email(msg), "player123@gmail.com")
+            self.assertEqual(extract_package(msg), "5000 CP")
+
+    def test_bot_calculation_summary_still_ignored(self):
+        msg = "Previous Total: 1321.00\nAdded: 34.50\nNew Total: 1355.50"
+        self.assertTrue(is_calculation_summary(msg))
+        self.assertFalse(contains_order_keyword(msg)[0])
+
+
 if __name__ == "__main__":
     unittest.main()
