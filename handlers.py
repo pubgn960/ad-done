@@ -158,6 +158,14 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info(f"[CLIENT] Bot is currently turned OFF. Message in chat {chat.id} ignored.")
         return
 
+    # Diagnostic: record sender type so logs show whether bot-originated messages are received
+    sender_is_bot = bool(user and user.is_bot)
+    logger.info(
+        f"[CLIENT] Message {message.message_id} received in chat {chat.id} "
+        f"from {'BOT' if sender_is_bot else 'USER'} "
+        f"{(user.username or user.id) if user else 'unknown'}"
+    )
+
     # Ignore Super Admin & Delivery User Messages in Client Group
     user_id = user.id if user else None
     if user_id:
