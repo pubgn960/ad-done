@@ -98,6 +98,31 @@ PRICE_INPUT_SESSION: Dict[int, Dict[str, Any]] = {}
 # Cache for deduplicating status warning reply messages per media group (album)
 WARNED_MEDIA_GROUPS: Dict[str, bool] = {}
 
+# Last seen text/caption of Client Group messages: "chat_id:message_id" -> text (bounded)
+SEEN_MESSAGE_TEXT: Dict[str, str] = {}
+
+
+def remember_message_text(chat_id: int, message_id: int, text: str) -> None:
+    """Stores the last seen text of a Client Group message (bounded to 2000 entries)."""
+    SEEN_MESSAGE_TEXT[f"{chat_id}:{message_id}"] = text or ""
+    if len(SEEN_MESSAGE_TEXT) > 2000:
+        SEEN_MESSAGE_TEXT.pop(next(iter(SEEN_MESSAGE_TEXT)), None)
+
+
+def is_genuine_edit(chat_id: int, message_id: int, new_text: str, edit_date: Any) -> bool:
+    """
+    Returns True only for real content edits.
+    Reaction-triggered or other metadata-only updates (no edit_date, or text unchanged) return False.
+    """
+    if not edit_date:
+        return False
+    key = f"{chat_id}:{message_id}"
+    previous = SEEN_MESSAGE_TEXT.get(key)
+    if previous is not None and previous == (new_text or ""):
+        return False
+    SEEN_MESSAGE_TEXT[key] = new_text or ""
+    return True
+
 
 def should_suppress_media_group_warning(order_id: int, media_group_id: Optional[str], status: str) -> bool:
     """Returns True if a status warning reply has already been sent for this media group album."""
@@ -180,6 +205,8 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text_content:
         logger.debug(f"[CLIENT] Message {message.message_id} in Client Group has no text/caption content.")
         return
+
+    remember_message_text(chat.id, message.message_id, text_content)
 
     # Filter out calculation summary messages (e.g. accounting bot updates)
     if is_calculation_summary(text_content):
@@ -361,6 +388,12 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     text_content = message.text or message.caption or ""
     if is_calculation_summary(text_content):
         logger.info(f"[CLIENT] Calculation summary edited message ignored. Message ID: {message.message_id}")
+        return
+
+    # Reactions and other non-edit updates must never trigger a reply.
+    # A genuine edit carries edit_date and changes the text/caption we originally saw.
+    if not is_genuine_edit(chat.id, message.message_id, text_content, getattr(message, "edit_date", None)):
+        logger.debug(f"[CLIENT] Non-content update (e.g. reaction) on message {message.message_id} ignored.")
         return
 
     logger.info(f"[CLIENT] Customer edited message {message.message_id} in Client Group {chat.id}.")

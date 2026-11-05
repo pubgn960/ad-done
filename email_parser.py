@@ -161,3 +161,21 @@ def extract_package(text: Optional[str]) -> str:
         return " | ".join(candidate_lines[:2])
 
     return "Standard Package"
+
+
+# Known CODM account login methods (case-insensitive, whole word)
+LOGIN_METHODS: List[str] = ["Activision", "Facebook", "Google", "Apple", "Line", "VK", "Twitter", "Guest"]
+
+
+def extract_login_method(text: Optional[str]) -> Optional[str]:
+    """
+    Extracts the account login method (e.g. 'Activision') from an order message.
+    Returns the canonical method name, or None if no known method is mentioned.
+    Parse-only helper: the value is not stored in the database.
+    """
+    if not text:
+        return None
+    for method in LOGIN_METHODS:
+        if re.search(rf'\b{re.escape(method)}\b', text, re.IGNORECASE):
+            return method
+    return None
