@@ -28,7 +28,7 @@ from sqlalchemy import update as update_sql, select
 
 from config import Config
 from keywords import contains_order_keyword, is_calculation_summary
-from email_parser import extract_email, extract_order_id, extract_package, extract_last_email
+from email_parser import extract_email, extract_order_id, extract_package, extract_valid_cp_package, extract_last_email
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -213,25 +213,18 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info(f"[CLIENT] Calculation summary message ignored. Message ID: {message.message_id}")
         return
 
-    # Keyword & CP Package-Based Order Detection
-    matched, match_info = contains_order_keyword(text_content)
-    if not matched:
-        logger.info("[DETECTOR] No keyword found. Message ignored.")
+    # Strict Order Validation: BOTH valid email AND valid supported CP package are required
+    email = extract_email(text_content)
+    package_desc = extract_valid_cp_package(text_content)
+
+    if not email or not package_desc:
+        logger.info(
+            f"[DETECTOR] Strict validation failed for message {message.message_id} "
+            f"(valid_email={bool(email)}, valid_cp={bool(package_desc)}). Ignored."
+        )
         return
 
-    if match_info and match_info.startswith("cp_package:"):
-        pkg_val = match_info.split(":", 1)[1]
-        logger.info(f"[DETECTOR] Known CP package detected: {pkg_val}")
-        logger.info("[DETECTOR] Order detected from CP package")
-    elif match_info and match_info.startswith("unknown_cp_package:"):
-        pkg_val = match_info.split(":", 1)[1]
-        logger.info(f"[DETECTOR] Unknown CP package detected: {pkg_val}")
-        logger.info("[DETECTOR] Order detected from CP package")
-    else:
-        logger.info(f"[DETECTOR] Keyword matched: {match_info}")
-
-    email = extract_email(text_content) or f"order_{message.message_id}@customer.com"
-    package_desc = extract_package(text_content)
+    logger.info(f"[DETECTOR] Valid order detected: email={email}, package={package_desc}")
     logger.info(f"[PARSER] Package: {package_desc}")
 
     # Determine Group Category ('A' or 'B')

@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 
 # Standard Regex pattern for detecting email addresses
 EMAIL_REGEX = re.compile(
-    r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
+    r'(?<![A-Za-z0-9._%+-])'
+    r'[A-Za-z0-9](?:[A-Za-z0-9._%+-]*[A-Za-z0-9])?'
+    r'@'
+    r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+'
+    r'[A-Za-z]{2,}'
+    r'(?![A-Za-z0-9_@-])',
     re.IGNORECASE
 )
 
@@ -101,6 +106,43 @@ HEADER_KEYWORDS = {
     "uid", "id", "user", "username", "account", "credentials",
     "wallet", "address", "network"
 }
+
+
+def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
+    """
+    Strictly extracts a supported CODM CP package from text using Config.KNOWN_CP_PACKAGES.
+    Email addresses are masked before scanning so digits inside an email never count as a package.
+    Returns formatted '<val> CP' string if a supported package is found, else None.
+    """
+    if not text:
+        return None
+
+    from keywords import normalize_cp_text
+    from config import Config
+
+    # Mask emails so digits inside an email (e.g. player.5000@gmail.com) don't match as CP
+    text_no_email = EMAIL_REGEX.sub(" ", text)
+    normalized = normalize_cp_text(text_no_email)
+
+    # 1. Explicit '<number> CP' matches (e.g. '5000 CP', '2,400 CP', '5000cp')
+    for num_str in re.findall(r'(?<!\.)\b(\d+)\s*CP\b', normalized, re.IGNORECASE):
+        try:
+            val = int(num_str)
+            if val in Config.KNOWN_CP_PACKAGES:
+                return f"{val} CP"
+        except ValueError:
+            pass
+
+    # 2. Standalone integer matches in supported package catalog (e.g. '5000', '2400')
+    for num_str in re.findall(r'(?<!\.)\b(\d+)\b(?!\.\d)', normalized):
+        try:
+            val = int(num_str)
+            if val in Config.KNOWN_CP_PACKAGES:
+                return f"{val} CP"
+        except ValueError:
+            pass
+
+    return None
 
 
 def extract_package(text: Optional[str]) -> str:
