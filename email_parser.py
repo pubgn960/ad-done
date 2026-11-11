@@ -6,14 +6,14 @@ Includes extract_last_email helper for Loader caption email overrides.
 
 import re
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Standard Regex pattern for detecting email addresses
+# Universal email format regex: validates structure (local@domain.tld) for ANY valid domain & TLD
 EMAIL_REGEX = re.compile(
-    r'(?<![A-Za-z0-9._%+-])'
-    r'[A-Za-z0-9](?:[A-Za-z0-9._%+-]*[A-Za-z0-9])?'
+    r'(?<![A-Za-z0-9._%+@-])'
+    r'[A-Za-z0-9_%+-]+(?:\.[A-Za-z0-9_%+-]+)*'
     r'@'
     r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+'
     r'[A-Za-z]{2,}'
@@ -108,14 +108,74 @@ HEADER_KEYWORDS = {
 }
 
 
-def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
+# Exact supported Double CP Event combinations: (left, right) -> (canonical_combo, total_cp)
+DOUBLE_CP_COMBINATIONS: Dict[Tuple[int, int], Tuple[str, int]] = {
+    (80, 80): ("80+80", 160),
+    (400, 400): ("400+400", 800),
+    (800, 800): ("800+800", 1600),
+    (2000, 2000): ("2000+2000", 4000),
+    (4000, 4000): ("4000+4000", 8000),
+    (8000, 8000): ("8000+8000", 16000),
+    # Short customer inputs
+    (2, 2): ("2000+2000", 4000),
+    (4, 4): ("4000+4000", 8000),
+    (8, 8): ("8000+8000", 16000),
+}
+
+# Labels that indicate a standalone number is a price, password, UID, or phone rather than a CP package
+NON_CP_NUMBER_PREFIX_RE = re.compile(
+    r'(?:\b(?:price|rs|pkr|usd|inr|eur|gbp|total|amount|uid|id|pass|password|pin|code|phone|tel|mobile|order)\b[:\s.\-]*|[$€£₹]\s*)$',
+    re.IGNORECASE
+)
+
+
+def extract_double_cp_package(text: Optional[str]) -> Optional[Dict[str, Any]]:
     """
-    Strictly extracts a supported CODM CP package from text using Config.KNOWN_CP_PACKAGES.
-    Email addresses are masked before scanning so digits inside an email never count as a package.
-    Returns formatted '<val> CP' string if a supported package is found, else None.
+    Detects Double CP Event combinations (full, comma, k-notation, optional CP suffix, and short forms 2+2/4+4/8+8).
+    Masks emails first so '+' inside emails never matches.
+    Returns dict with 'combination', 'total_cp', and 'formatted', or None if no supported Double CP combination exists.
     """
     if not text:
         return None
+
+    from keywords import normalize_cp_text
+
+    text_no_email = EMAIL_REGEX.sub(" ", text)
+    normalized = normalize_cp_text(text_no_email)
+
+    for match in re.finditer(r'(?<![.\-+\d])\b(\d+)\s*\+\s*(\d+)(?:\s*CP)?\b(?![.\-+\d])', normalized, re.IGNORECASE):
+        try:
+            left = int(match.group(1))
+            right = int(match.group(2))
+        except ValueError:
+            continue
+
+        entry = DOUBLE_CP_COMBINATIONS.get((left, right))
+        if entry:
+            combo, total_cp = entry
+            return {
+                "combination": combo,
+                "total_cp": total_cp,
+                "formatted": f"Double CP: {combo} (Total: {total_cp} CP)",
+            }
+
+    return None
+
+
+def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
+    """
+    Strictly extracts either a supported Double CP Event combination or a supported normal CODM CP package.
+    Double CP detection runs before normal standalone CP extraction.
+    Email addresses are masked before scanning so digits inside an email never count as a package.
+    Returns formatted package string if valid, else None.
+    """
+    if not text:
+        return None
+
+    # 1. Check Double CP Event combinations first
+    double_cp = extract_double_cp_package(text)
+    if double_cp:
+        return double_cp["formatted"]
 
     from keywords import normalize_cp_text
     from config import Config
@@ -124,23 +184,32 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
     text_no_email = EMAIL_REGEX.sub(" ", text)
     normalized = normalize_cp_text(text_no_email)
 
-    # 1. Explicit '<number> CP' matches (e.g. '5000 CP', '2,400 CP', '5000cp')
-    for num_str in re.findall(r'(?<!\.)\b(\d+)\s*CP\b', normalized, re.IGNORECASE):
+    # 2. Explicit '<number> CP' matches (e.g. '5000 CP', '2,400 CP', '5K CP', '5000cp')
+    for match in re.finditer(r'(?<![.\-+\d])\b(\d+)\s*CP\b(?![.\-+\d])', normalized, re.IGNORECASE):
         try:
-            val = int(num_str)
+            val = int(match.group(1))
             if val in Config.KNOWN_CP_PACKAGES:
                 return f"{val} CP"
         except ValueError:
             pass
 
-    # 2. Standalone integer matches in supported package catalog (e.g. '5000', '2400')
-    for num_str in re.findall(r'(?<!\.)\b(\d+)\b(?!\.\d)', normalized):
+    # 3. Standalone integer matches in supported package catalog (e.g. '5000', '5k', '2.4k', '12k')
+    for match in re.finditer(r'(?<![.\-+\d])\b(\d+)\b(?![.\-+\d])', normalized):
         try:
-            val = int(num_str)
-            if val in Config.KNOWN_CP_PACKAGES:
-                return f"{val} CP"
+            val = int(match.group(1))
         except ValueError:
-            pass
+            continue
+
+        if val not in Config.KNOWN_CP_PACKAGES:
+            continue
+
+        # Ignore standalone numbers immediately preceded by price/ID/credential/phone labels on the same line
+        line_start = normalized.rfind("\n", 0, match.start()) + 1
+        prefix_on_line = normalized[line_start:match.start()]
+        if NON_CP_NUMBER_PREFIX_RE.search(prefix_on_line):
+            continue
+
+        return f"{val} CP"
 
     return None
 
@@ -148,7 +217,7 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
 def extract_package(text: Optional[str]) -> str:
     """
     Extracts package/item description from customer message.
-    Normalizes text and prioritizes explicit or known CP package detection.
+    Normalizes text and prioritizes Double CP and explicit or known CP package detection.
 
     Args:
         text (str, optional): Input order message text.
@@ -158,6 +227,10 @@ def extract_package(text: Optional[str]) -> str:
     """
     if not text:
         return "Standard Package"
+
+    double_cp = extract_double_cp_package(text)
+    if double_cp:
+        return double_cp["formatted"]
 
     from keywords import normalize_cp_text
     from config import Config

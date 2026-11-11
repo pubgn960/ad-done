@@ -54,7 +54,7 @@ def normalize_cp_text(text: Optional[str]) -> str:
         num_str = match.group(1)
         try:
             val = float(num_str)
-            int_val = int(val * 1000)
+            int_val = int(round(val * 1000))
             return str(int_val)
         except ValueError:
             return match.group(0)

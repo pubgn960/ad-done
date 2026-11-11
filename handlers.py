@@ -438,6 +438,10 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
     package_desc = dup_order_record.package or ""
 
     if action == "dup_confirm":
+        # Re-verify strict validation before creating a duplicate order
+        if not extract_email(email) or not extract_valid_cp_package(package_desc):
+            logger.warning(f"[CLIENT] Duplicate confirm blocked: invalid email/package on Order #{order_id}.")
+            return
         # Customer pressed ✅ Place Again - Execute exact workflow of a brand new order
         logger.info(f"[CLIENT] Customer pressed 'Place Again' for email '{email}'. Creating new Order...")
 
