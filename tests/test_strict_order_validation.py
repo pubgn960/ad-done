@@ -12,6 +12,7 @@ from email_parser import (
     extract_email,
     extract_double_cp_package,
     extract_valid_cp_package,
+    validate_order_fields,
 )
 from database import (
     BOT_SETTINGS,
@@ -187,10 +188,26 @@ class TestNormalAndDoubleCPDetection(unittest.TestCase):
             "user@gmail.com\nPrice: 5000",
             "user@gmail.com\nUID: 2400",
             "user@gmail.com\nPhone: 123-5000-880",
+            "user@gmail.com\nOrder ID: 5000",
+            "user@gmail.com\nOrder #2400",
             "player.5000@example.com",
             "Price is 5000.00 PKR",
         ]:
             self.assertIsNone(extract_valid_cp_package(bad), f"Should reject {bad}")
+
+    def test_shared_validate_order_fields_distinguishes_normal_and_double(self):
+        norm = validate_order_fields("user@company.pk 5000")
+        self.assertIsNotNone(norm)
+        self.assertEqual(norm["order_type"], "normal_cp")
+        self.assertEqual(norm["package"], "5000 CP")
+        self.assertEqual(norm["total_cp"], 5000)
+
+        dbl = validate_order_fields("user@company.pk 4k+4k")
+        self.assertIsNotNone(dbl)
+        self.assertEqual(dbl["order_type"], "double_cp")
+        self.assertEqual(dbl["combination"], "4000+4000")
+        self.assertEqual(dbl["total_cp"], 8000)
+        self.assertEqual(dbl["package"], "Double CP: 4000+4000 (Total: 8000 CP)")
 
 
 class TestStrictOrderHandler(unittest.IsolatedAsyncioTestCase):
@@ -313,6 +330,34 @@ class TestStrictOrderHandler(unittest.IsolatedAsyncioTestCase):
         await duplicate_order_callback_handler(cb_update, cb_ctx)
         cb_ctx.bot.copy_message.assert_not_awaited()
         self.assertIsNone(await get_pending_order_by_email("bad_dup@invalid"))
+
+    async def test_duplicate_confirm_accepts_normal_and_double_cp(self):
+        for email_addr, pkg_str, mid in [
+            ("strict.cust1@example.com", "5000 CP", 6501),
+            ("strict.cust2@example.com", "Double CP: 8000+8000 (Total: 16000 CP)", 6502),
+        ]:
+            dup_rec = await create_order(
+                email=email_addr,
+                client_chat_id=CLIENT_CHAT_ID,
+                original_message_id=mid,
+                package=pkg_str,
+                status="Duplicate_Pending",
+                category="A",
+            )
+            query = MagicMock()
+            query.data = f"dup_confirm:{dup_rec.id}"
+            query.answer = AsyncMock()
+            query.edit_message_text = AsyncMock()
+            cb_update = MagicMock()
+            cb_update.callback_query = query
+
+            cb_ctx = make_bot_context()
+            await duplicate_order_callback_handler(cb_update, cb_ctx)
+
+            cb_ctx.bot.copy_message.assert_awaited_once()
+            created = await get_pending_order_by_email(email_addr)
+            self.assertIsNotNone(created)
+            self.assertEqual(created.package, pkg_str)
 
 
 if __name__ == "__main__":

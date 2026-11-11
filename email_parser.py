@@ -122,9 +122,9 @@ DOUBLE_CP_COMBINATIONS: Dict[Tuple[int, int], Tuple[str, int]] = {
     (8, 8): ("8000+8000", 16000),
 }
 
-# Labels that indicate a standalone number is a price, password, UID, or phone rather than a CP package
+# Labels that indicate a standalone number is a price, password, UID, order ID, or phone rather than a CP package
 NON_CP_NUMBER_PREFIX_RE = re.compile(
-    r'(?:\b(?:price|rs|pkr|usd|inr|eur|gbp|total|amount|uid|id|pass|password|pin|code|phone|tel|mobile|order)\b[:\s.\-]*|[$€£₹]\s*)$',
+    r'(?:\b(?:price|rs|pkr|usd|inr|eur|gbp|total|amount|uid|id|pass|password|pin|code|phone|tel|mobile)\b[:\s.\-]*|\border\s*(?:id|#)[:\s.\-]*|[$€£₹]\s*)$',
     re.IGNORECASE
 )
 
@@ -162,20 +162,14 @@ def extract_double_cp_package(text: Optional[str]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
+def extract_normal_cp_package(text: Optional[str]) -> Optional[str]:
     """
-    Strictly extracts either a supported Double CP Event combination or a supported normal CODM CP package.
-    Double CP detection runs before normal standalone CP extraction.
+    Strictly extracts a supported Normal CODM CP package from text using Config.KNOWN_CP_PACKAGES.
     Email addresses are masked before scanning so digits inside an email never count as a package.
-    Returns formatted package string if valid, else None.
+    Returns formatted '<val> CP' string if valid, else None.
     """
     if not text:
         return None
-
-    # 1. Check Double CP Event combinations first
-    double_cp = extract_double_cp_package(text)
-    if double_cp:
-        return double_cp["formatted"]
 
     from keywords import normalize_cp_text
     from config import Config
@@ -184,7 +178,7 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
     text_no_email = EMAIL_REGEX.sub(" ", text)
     normalized = normalize_cp_text(text_no_email)
 
-    # 2. Explicit '<number> CP' matches (e.g. '5000 CP', '2,400 CP', '5K CP', '5000cp')
+    # 1. Explicit '<number> CP' matches (e.g. '5000 CP', '2,400 CP', '5K CP', '5000cp')
     for match in re.finditer(r'(?<![.\-+\d])\b(\d+)\s*CP\b(?![.\-+\d])', normalized, re.IGNORECASE):
         try:
             val = int(match.group(1))
@@ -193,7 +187,7 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
         except ValueError:
             pass
 
-    # 3. Standalone integer matches in supported package catalog (e.g. '5000', '5k', '2.4k', '12k')
+    # 2. Standalone integer matches in supported package catalog (e.g. '5000', '5k', '2.4k', '12k')
     for match in re.finditer(r'(?<![.\-+\d])\b(\d+)\b(?![.\-+\d])', normalized):
         try:
             val = int(match.group(1))
@@ -210,6 +204,58 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
             continue
 
         return f"{val} CP"
+
+    return None
+
+
+def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
+    """
+    Strictly extracts either a supported Double CP Event combination or a supported normal CODM CP package.
+    Double CP detection runs before normal standalone CP extraction.
+    Returns formatted package string if valid, else None.
+    """
+    if not text:
+        return None
+
+    double_cp = extract_double_cp_package(text)
+    if double_cp:
+        return double_cp["formatted"]
+
+    return extract_normal_cp_package(text)
+
+
+def validate_order_fields(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Shared strict order validator used by both source_group_handler and duplicate_order_callback_handler.
+    Requires BOTH a syntactically valid email AND a supported Normal or Double CP package in the same text.
+    Returns structured dict {'email', 'package', 'order_type', 'combination', 'total_cp'} or None.
+    """
+    if not text:
+        return None
+
+    email = extract_email(text)
+    if not email:
+        return None
+
+    double_cp = extract_double_cp_package(text)
+    if double_cp:
+        return {
+            "email": email,
+            "package": double_cp["formatted"],
+            "order_type": "double_cp",
+            "combination": double_cp["combination"],
+            "total_cp": double_cp["total_cp"],
+        }
+
+    normal_cp = extract_normal_cp_package(text)
+    if normal_cp:
+        return {
+            "email": email,
+            "package": normal_cp,
+            "order_type": "normal_cp",
+            "combination": None,
+            "total_cp": int(normal_cp.split()[0]),
+        }
 
     return None
 

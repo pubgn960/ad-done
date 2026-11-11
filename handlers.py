@@ -28,7 +28,7 @@ from sqlalchemy import update as update_sql, select
 
 from config import Config
 from keywords import contains_order_keyword, is_calculation_summary
-from email_parser import extract_email, extract_order_id, extract_package, extract_valid_cp_package, extract_last_email
+from email_parser import extract_email, extract_order_id, extract_package, validate_order_fields, extract_last_email
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -213,18 +213,18 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info(f"[CLIENT] Calculation summary message ignored. Message ID: {message.message_id}")
         return
 
-    # Strict Order Validation: BOTH valid email AND valid supported CP package are required
-    email = extract_email(text_content)
-    package_desc = extract_valid_cp_package(text_content)
-
-    if not email or not package_desc:
+    # Strict Order Validation: BOTH valid email AND valid supported Normal or Double CP package are required
+    validated = validate_order_fields(text_content)
+    if not validated:
         logger.info(
             f"[DETECTOR] Strict validation failed for message {message.message_id} "
-            f"(valid_email={bool(email)}, valid_cp={bool(package_desc)}). Ignored."
+            f"(valid_email={bool(extract_email(text_content))}, valid_cp=False). Ignored."
         )
         return
 
-    logger.info(f"[DETECTOR] Valid order detected: email={email}, package={package_desc}")
+    email = validated["email"]
+    package_desc = validated["package"]
+    logger.info(f"[DETECTOR] Valid {validated['order_type']} order detected: email={email}, package={package_desc}")
     logger.info(f"[PARSER] Package: {package_desc}")
 
     # Determine Group Category ('A' or 'B')
@@ -438,10 +438,13 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
     package_desc = dup_order_record.package or ""
 
     if action == "dup_confirm":
-        # Re-verify strict validation before creating a duplicate order
-        if not extract_email(email) or not extract_valid_cp_package(package_desc):
+        # Shared strict validation before creating a duplicate order (works identically for Normal & Double CP)
+        validated_dup = validate_order_fields(f"{email or ''} {package_desc or ''}")
+        if not validated_dup:
             logger.warning(f"[CLIENT] Duplicate confirm blocked: invalid email/package on Order #{order_id}.")
             return
+        email = validated_dup["email"]
+        package_desc = validated_dup["package"]
         # Customer pressed ✅ Place Again - Execute exact workflow of a brand new order
         logger.info(f"[CLIENT] Customer pressed 'Place Again' for email '{email}'. Creating new Order...")
 
