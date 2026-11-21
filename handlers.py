@@ -736,10 +736,13 @@ async def price_input_text_handler(update: Update, context: ContextTypes.DEFAULT
             session = sess
             break
 
-    # DB fallback check if session lost after bot restart
+    # DB fallback check if session lost after bot restart, or direct reply to price message
     if not target_order_id:
         async with AsyncSessionLocal() as db_sess:
-            stmt = select(Order).where(Order.price_prompt_msg_id == reply_msg_id)
+            stmt = select(Order).where(
+                (Order.price_prompt_msg_id == reply_msg_id) |
+                (Order.price_msg_id == reply_msg_id)
+            )
             res = await db_sess.execute(stmt)
             matched_order = res.scalar_one_or_none()
             if matched_order:

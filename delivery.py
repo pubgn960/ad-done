@@ -23,7 +23,8 @@ from database import (
     get_all_orders_by_email,
     get_current_settings,
     mark_order_delivered,
-    delete_orders_by_email
+    delete_orders_by_email,
+    update_order_price
 )
 from models import Order, Image
 from utils import safe_set_message_reaction
@@ -256,22 +257,23 @@ async def deliver_order_by_id(
     # 5. Category A Only Price Workflow in CLIENT GROUP (client_chat_id & original_message_id)
     order_category = order.category or (CLIENT_GROUPS_CACHE.get(client_chat_id, "A") if client_chat_id else "A")
     if order_category == "A" and client_chat_id:
-        matched_price = get_category_a_price(order.package)
-        if order.price:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
-        else:
-            button_label = f"💰 Price: {matched_price}" if matched_price else "💰 Price"
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(button_label, callback_data=f"price_set:{order.id}")]])
-        try:
-            await bot.send_message(
-                chat_id=client_chat_id,
-                text="💰 Click below to set price:",
-                reply_to_message_id=order.original_message_id,
-                reply_markup=keyboard
-            )
-            logger.info(f"[PRICE] Category A Price button sent to Client Group {client_chat_id} for Order #{order.id}.")
-        except Exception as e:
-            logger.exception(f"[PRICE] Failed to send Price button to Client Group: {e}")
+        matched_price = order.price or get_category_a_price(order.package)
+        if matched_price:
+            # Prevent duplicate price messages if already sent during album delivery or retry handling
+            if not order.price_msg_id:
+                try:
+                    price_text = f"💰 Price: {matched_price}"
+                    sent_price_msg = await bot.send_message(
+                        chat_id=client_chat_id,
+                        text=price_text,
+                        reply_to_message_id=order.original_message_id
+                    )
+                    await update_order_price(order.id, matched_price, price_msg_id=sent_price_msg.message_id)
+                    logger.info(f"[PRICE] Category A text price posted in Client Group {client_chat_id} for Order #{order.id}: '{price_text}'")
+                except Exception as e:
+                    logger.exception(f"[PRICE] Failed to send price message to Client Group: {e}")
+            elif not order.price:
+                await update_order_price(order.id, matched_price)
 
     # 6. Optional post-delivery cleanup
     if Config.DELETE_AFTER_DELIVERY:

@@ -1,5 +1,5 @@
 """
-Unit and integration tests for Category A CP Price System.
+Unit and integration tests for Category A Automatic Delivery Text Pricing.
 Validates:
 1. Normal CP Prices:
    - 10800 CP -> $80
@@ -14,15 +14,15 @@ Validates:
    - 2000+2000 (4000 CP) -> $20.50
    - 800+800 (1600 CP) -> $9
    - 400+400 (800 CP) -> $4.75
-3. Strict separation of Normal and Double CP:
-   - Double CP price is NEVER calculated from total CP alone.
-   - Normal CP never matches Double CP prices.
-   - Unsupported packages/combos return None and fall back to manual entry.
-4. Delivery button workflow & callback handler:
-   - Uses matching price on delivery button (e.g. '💰 Price: $80').
-   - Clicking price button saves price to DB, posts calculator message, and switches button to '✏️ Edit Price'.
-   - Fallback to manual entry when no matching price exists.
-   - Category B workflow remains unchanged (no price button).
+3. Complete removal of inline Price buttons:
+   - NO inline keyboard or '💰 Price' button attached.
+   - NO 'Click below to set price:' message sent.
+   - Price displayed as plain text message (e.g. '💰 Price: $20.50').
+   - Automatic DB saving of matching price into order.price.
+4. Unlisted packages receive no price messages or incorrect prices.
+5. Duplicate prevention during album delivery or retry handling.
+6. Category B routing and delivery behavior remains completely unchanged.
+7. Non-button price update capability for authorized admins.
 """
 
 import unittest
@@ -31,11 +31,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from config import (
     CATEGORY_A_NORMAL_CP_PRICES,
     CATEGORY_A_DOUBLE_CP_PRICES,
-    Config,
 )
-from email_parser import get_category_a_price, extract_double_cp_package, validate_order_fields
-from handlers import is_valid_price_string, price_callback_handler, PRICE_INPUT_SESSION
-from models import Order
+from email_parser import get_category_a_price
+from delivery import deliver_order_by_id
+from handlers import is_valid_price_string, price_input_text_handler, PRICE_INPUT_SESSION
+from models import Order, Image
 
 
 class TestCategoryACPPrices(unittest.TestCase):
@@ -54,7 +54,6 @@ class TestCategoryACPPrices(unittest.TestCase):
         for pkg, expected_price in expected.items():
             with self.subTest(package=pkg):
                 self.assertEqual(get_category_a_price(pkg), expected_price)
-                # Test with integer strings and order objects
                 order = Order(id=1, email="user@gmail.com", package=pkg, category="A")
                 self.assertEqual(get_category_a_price(order), expected_price)
 
@@ -98,41 +97,34 @@ class TestCategoryACPPrices(unittest.TestCase):
 
     def test_normal_and_double_cp_strict_separation(self):
         """
-        Requirement 4: Normal CP and Double CP must be matched separately.
+        Requirement: Normal CP and Double CP must be matched separately.
         Never calculate a Double CP price from its total CP alone.
         """
-        # Normal CP packages having amounts equal to Double CP totals must NOT match Double CP prices
         self.assertIsNone(get_category_a_price("16000 CP"))
         self.assertIsNone(get_category_a_price("8000 CP"))
         self.assertIsNone(get_category_a_price("4000 CP"))
         self.assertIsNone(get_category_a_price("1600 CP"))
         self.assertIsNone(get_category_a_price("800 CP"))
 
-        # Double CP 80+80 has total 160 CP; neither 80+80 nor 160 are in the Double CP price list.
-        # It must NEVER be priced as $1 (the Normal 80 CP price) or anything else.
         self.assertIsNone(get_category_a_price("Double CP: 80+80 (Total: 160 CP)"))
         self.assertIsNone(get_category_a_price("80+80"))
 
-        # Normal 5000 CP is a valid order package but has no Category A preset price -> None (manual fallback)
         self.assertIsNone(get_category_a_price("5000 CP"))
         self.assertIsNone(get_category_a_price("12000 CP"))
 
     def test_is_valid_price_string(self):
         """Tests price string validation for manual entry and edits."""
-        # Standard numbers
         self.assertTrue(is_valid_price_string("15"))
         self.assertTrue(is_valid_price_string("15.5"))
         self.assertTrue(is_valid_price_string("2500"))
         self.assertTrue(is_valid_price_string("2999.99"))
 
-        # Currency formatted numbers
         self.assertTrue(is_valid_price_string("$80"))
         self.assertTrue(is_valid_price_string("$41"))
         self.assertTrue(is_valid_price_string("$20.50"))
         self.assertTrue(is_valid_price_string("$4.75"))
         self.assertTrue(is_valid_price_string("$1"))
 
-        # Invalid formats
         self.assertFalse(is_valid_price_string("abc"))
         self.assertFalse(is_valid_price_string("15rs"))
         self.assertFalse(is_valid_price_string("price 20"))
@@ -140,214 +132,292 @@ class TestCategoryACPPrices(unittest.TestCase):
         self.assertFalse(is_valid_price_string("$$20"))
 
 
-class TestCategoryAPriceWorkflowHandlers(unittest.IsolatedAsyncioTestCase):
-    """Tests Category A Price workflow callback button actions and DB updates."""
+class TestCategoryADeliveryTextPrice(unittest.IsolatedAsyncioTestCase):
+    """Integration tests for delivery message plain text price and button removal."""
 
     def setUp(self):
         PRICE_INPUT_SESSION.clear()
 
-    async def test_automatic_price_callback_for_normal_cp(self):
-        """Clicking price_set on Normal 10800 CP automatically sets $80 and posts calculator message."""
+    async def test_delivery_all_normal_cp_prices(self):
+        """Verifies all Normal CP packages deliver plain text price, no buttons, and update DB."""
+        normal_cases = [
+            ("10800 CP", "$80"),
+            ("5040 CP", "$41"),
+            ("2400 CP", "$20.50"),
+            ("880 CP", "$9"),
+            ("420 CP", "$4.75"),
+            ("80 CP", "$1"),
+        ]
+
+        for pkg, expected_price in normal_cases:
+            with self.subTest(package=pkg, price=expected_price):
+                img = Image(id=1, telegram_file_id="file_norm", file_type="photo")
+                order = Order(
+                    id=301,
+                    email="norm@example.com",
+                    package=pkg,
+                    category="A",
+                    client_chat_id=-100111222,
+                    original_message_id=701,
+                    status="Pending",
+                    price=None,
+                    price_msg_id=None,
+                    images=[img]
+                )
+
+                sent_msg = MagicMock(message_id=888)
+                bot = MagicMock()
+                bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=887)])
+                bot.send_message = AsyncMock(return_value=sent_msg)
+                bot.set_message_reaction = AsyncMock(return_value=True)
+
+                with patch("delivery.get_order_by_id", AsyncMock(return_value=order)), \
+                     patch("delivery.mark_order_delivered", AsyncMock()), \
+                     patch("delivery.update_order_price", AsyncMock()) as mock_update_price, \
+                     patch("delivery.CLIENT_GROUPS_CACHE", {-100111222: "A"}), \
+                     patch("delivery.BOT_SETTINGS", {"source_group_id": -100111222, "delivery_group_id": -100333444}):
+
+                    res = await deliver_order_by_id(bot=bot, order_id=301)
+                    self.assertTrue(res)
+
+                    # 1. Plain text price message sent in Client Group
+                    price_calls = [
+                        c for c in bot.send_message.call_args_list
+                        if c[1].get("chat_id") == -100111222
+                    ]
+                    self.assertEqual(len(price_calls), 1)
+                    kwargs = price_calls[0][1]
+                    self.assertEqual(kwargs["text"], f"💰 Price: {expected_price}")
+                    self.assertEqual(kwargs["reply_to_message_id"], 701)
+
+                    # 2. NO inline keyboard / buttons attached
+                    self.assertNotIn("reply_markup", kwargs)
+
+                    # 3. NO 'Click below to set price:' message sent
+                    all_sent_texts = [c[1].get("text", "") for c in bot.send_message.call_args_list]
+                    for t in all_sent_texts:
+                        self.assertNotIn("Click below to set price:", t)
+
+                    # 4. DB price updated with matching price and price_msg_id
+                    mock_update_price.assert_called_once_with(301, expected_price, price_msg_id=888)
+
+    async def test_delivery_all_double_cp_prices(self):
+        """Verifies all Double CP packages deliver plain text price, no buttons, and update DB."""
+        double_cases = [
+            ("Double CP: 8000+8000 (Total: 16000 CP)", "$80"),
+            ("Double CP: 4000+4000 (Total: 8000 CP)", "$41"),
+            ("Double CP: 2000+2000 (Total: 4000 CP)", "$20.50"),
+            ("Double CP: 800+800 (Total: 1600 CP)", "$9"),
+            ("Double CP: 400+400 (Total: 800 CP)", "$4.75"),
+        ]
+
+        for pkg, expected_price in double_cases:
+            with self.subTest(package=pkg, price=expected_price):
+                img = Image(id=2, telegram_file_id="file_double", file_type="photo")
+                order = Order(
+                    id=302,
+                    email="double@example.com",
+                    package=pkg,
+                    category="A",
+                    client_chat_id=-100111222,
+                    original_message_id=702,
+                    status="Pending",
+                    price=None,
+                    price_msg_id=None,
+                    images=[img]
+                )
+
+                sent_msg = MagicMock(message_id=899)
+                bot = MagicMock()
+                bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=887)])
+                bot.send_message = AsyncMock(return_value=sent_msg)
+                bot.set_message_reaction = AsyncMock(return_value=True)
+
+                with patch("delivery.get_order_by_id", AsyncMock(return_value=order)), \
+                     patch("delivery.mark_order_delivered", AsyncMock()), \
+                     patch("delivery.update_order_price", AsyncMock()) as mock_update_price, \
+                     patch("delivery.CLIENT_GROUPS_CACHE", {-100111222: "A"}), \
+                     patch("delivery.BOT_SETTINGS", {"source_group_id": -100111222, "delivery_group_id": -100333444}):
+
+                    res = await deliver_order_by_id(bot=bot, order_id=302)
+                    self.assertTrue(res)
+
+                    price_calls = [
+                        c for c in bot.send_message.call_args_list
+                        if c[1].get("chat_id") == -100111222
+                    ]
+                    self.assertEqual(len(price_calls), 1)
+                    kwargs = price_calls[0][1]
+                    self.assertEqual(kwargs["text"], f"💰 Price: {expected_price}")
+                    self.assertNotIn("reply_markup", kwargs)
+                    mock_update_price.assert_called_once_with(302, expected_price, price_msg_id=899)
+
+    async def test_delivery_unlisted_package_no_price_message(self):
+        """Unlisted packages (e.g. 5000 CP or Double CP 80+80) must NOT receive a price message or button."""
+        unlisted = ["5000 CP", "Double CP: 80+80 (Total: 160 CP)", "Standard Package", "12000 CP"]
+
+        for pkg in unlisted:
+            with self.subTest(package=pkg):
+                img = Image(id=3, telegram_file_id="file_unlist", file_type="photo")
+                order = Order(
+                    id=303,
+                    email="unlist@example.com",
+                    package=pkg,
+                    category="A",
+                    client_chat_id=-100111222,
+                    original_message_id=703,
+                    status="Pending",
+                    price=None,
+                    price_msg_id=None,
+                    images=[img]
+                )
+
+                bot = MagicMock()
+                bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=887)])
+                bot.send_message = AsyncMock()
+                bot.set_message_reaction = AsyncMock(return_value=True)
+
+                with patch("delivery.get_order_by_id", AsyncMock(return_value=order)), \
+                     patch("delivery.mark_order_delivered", AsyncMock()), \
+                     patch("delivery.update_order_price", AsyncMock()) as mock_update_price, \
+                     patch("delivery.CLIENT_GROUPS_CACHE", {-100111222: "A"}), \
+                     patch("delivery.BOT_SETTINGS", {"source_group_id": -100111222, "delivery_group_id": -100333444}):
+
+                    res = await deliver_order_by_id(bot=bot, order_id=303)
+                    self.assertTrue(res)
+
+                    # No message should have been sent to client_chat_id
+                    client_calls = [
+                        c for c in bot.send_message.call_args_list
+                        if c[1].get("chat_id") == -100111222
+                    ]
+                    self.assertEqual(len(client_calls), 0)
+                    mock_update_price.assert_not_called()
+
+    async def test_prevent_duplicate_price_message_on_retry(self):
+        """If price_msg_id is already set, delivery retry must NOT send a duplicate price message."""
+        img = Image(id=4, telegram_file_id="file_dup", file_type="photo")
         order = Order(
-            id=101,
-            email="cust101@example.com",
+            id=304,
+            email="retry@example.com",
             package="10800 CP",
             category="A",
             client_chat_id=-100111222,
-            original_message_id=501,
-            price=None
-        )
-
-        query = MagicMock()
-        query.data = f"price_set:{order.id}"
-        query.message = MagicMock()
-        query.message.message_id = 901
-        query.message.edit_reply_markup = AsyncMock()
-        query.answer = AsyncMock()
-
-        user = MagicMock(id=123456789)
-        update = MagicMock(callback_query=query, effective_user=user)
-
-        sent_msg = MagicMock(message_id=999)
-        bot = MagicMock()
-        bot.send_message = AsyncMock(return_value=sent_msg)
-        context = MagicMock(bot=bot)
-
-        with patch("handlers.is_admin", return_value=True), \
-             patch("handlers.get_order_by_id", AsyncMock(return_value=order)), \
-             patch("handlers.update_order_price", AsyncMock()) as mock_update_price:
-
-            await price_callback_handler(update, context)
-
-            # 1. Message posted in client group
-            bot.send_message.assert_called_once_with(
-                chat_id=-100111222,
-                text="💰 Price: $80",
-                reply_to_message_id=501
-            )
-
-            # 2. Price saved in database
-            mock_update_price.assert_called_once_with(101, "$80", price_msg_id=999)
-
-            # 3. Button switched to Edit Price
-            query.message.edit_reply_markup.assert_called_once()
-            call_markup = query.message.edit_reply_markup.call_args[1]["reply_markup"]
-            self.assertEqual(call_markup.inline_keyboard[0][0].text, "✏️ Edit Price")
-            self.assertEqual(call_markup.inline_keyboard[0][0].callback_data, "price_edit:101")
-
-            # 4. Callback query answered
-            query.answer.assert_called_once_with("✅ Price set to $80")
-
-    async def test_automatic_price_callback_for_double_cp(self):
-        """Clicking price_set on Double CP 4000+4000 automatically sets $41."""
-        order = Order(
-            id=102,
-            email="cust102@example.com",
-            package="Double CP: 4000+4000 (Total: 8000 CP)",
-            category="A",
-            client_chat_id=-100111222,
-            original_message_id=502,
-            price=None
-        )
-
-        query = MagicMock()
-        query.data = f"price_set:{order.id}"
-        query.message = MagicMock()
-        query.message.message_id = 902
-        query.message.edit_reply_markup = AsyncMock()
-        query.answer = AsyncMock()
-
-        user = MagicMock(id=123456789)
-        update = MagicMock(callback_query=query, effective_user=user)
-
-        sent_msg = MagicMock(message_id=998)
-        bot = MagicMock()
-        bot.send_message = AsyncMock(return_value=sent_msg)
-        context = MagicMock(bot=bot)
-
-        with patch("handlers.is_admin", return_value=True), \
-             patch("handlers.get_order_by_id", AsyncMock(return_value=order)), \
-             patch("handlers.update_order_price", AsyncMock()) as mock_update_price:
-
-            await price_callback_handler(update, context)
-
-            bot.send_message.assert_called_once_with(
-                chat_id=-100111222,
-                text="💰 Price: $41",
-                reply_to_message_id=502
-            )
-            mock_update_price.assert_called_once_with(102, "$41", price_msg_id=998)
-            query.answer.assert_called_once_with("✅ Price set to $41")
-
-    async def test_fallback_to_manual_price_entry_when_unknown_package(self):
-        """If package is not in the Category A price list, prompt for manual price."""
-        order = Order(
-            id=103,
-            email="cust103@example.com",
-            package="5000 CP",  # 5000 is not in preset price table
-            category="A",
-            client_chat_id=-100111222,
-            original_message_id=503,
-            price=None
-        )
-
-        query = MagicMock()
-        query.data = f"price_set:{order.id}"
-        query.message = MagicMock()
-        query.message.message_id = 903
-        query.answer = AsyncMock()
-
-        user = MagicMock(id=123456789)
-        update = MagicMock(callback_query=query, effective_user=user)
-
-        prompt_msg = MagicMock(message_id=777)
-        bot = MagicMock()
-        bot.send_message = AsyncMock(return_value=prompt_msg)
-        context = MagicMock(bot=bot)
-
-        with patch("handlers.is_admin", return_value=True), \
-             patch("handlers.get_order_by_id", AsyncMock(return_value=order)), \
-             patch("handlers.set_order_price_prompt", AsyncMock()) as mock_set_prompt:
-
-            await price_callback_handler(update, context)
-
-            # Prompts admin for manual price input
-            bot.send_message.assert_called_once_with(
-                chat_id=-100111222,
-                text="Enter order price:",
-                reply_to_message_id=903
-            )
-            mock_set_prompt.assert_called_once_with(103, 777)
-            self.assertIn(103, PRICE_INPUT_SESSION)
-
-    async def test_delivery_button_creation_for_category_a_and_b(self):
-        """Verifies delivery message inline buttons in Category A and Category B."""
-        from delivery import deliver_order_by_id
-        from models import Image
-
-        # Mock order with 1 image
-        img = Image(id=1, telegram_file_id="file_123", file_type="photo")
-        order_cat_a = Order(
-            id=201,
-            email="cat_a@example.com",
-            package="10800 CP",
-            category="A",
-            client_chat_id=-100111222,
-            original_message_id=601,
+            original_message_id=704,
             status="Pending",
+            price="$80",
+            price_msg_id=777888,  # Price message was ALREADY sent
             images=[img]
         )
 
         bot = MagicMock()
-        bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=888)])
-        bot.send_message = AsyncMock(return_value=MagicMock(message_id=889))
+        bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=887)])
+        bot.send_message = AsyncMock()
         bot.set_message_reaction = AsyncMock(return_value=True)
 
-        with patch("delivery.get_order_by_id", AsyncMock(return_value=order_cat_a)), \
+        with patch("delivery.get_order_by_id", AsyncMock(return_value=order)), \
              patch("delivery.mark_order_delivered", AsyncMock()), \
+             patch("delivery.update_order_price", AsyncMock()) as mock_update_price, \
              patch("delivery.CLIENT_GROUPS_CACHE", {-100111222: "A"}), \
              patch("delivery.BOT_SETTINGS", {"source_group_id": -100111222, "delivery_group_id": -100333444}):
 
-            await deliver_order_by_id(bot=bot, order_id=201)
+            res = await deliver_order_by_id(bot=bot, order_id=304)
+            self.assertTrue(res)
 
-            # Check that send_message was called to attach the price button
-            # Find the call with "💰 Click below to set price:"
-            price_button_call = None
-            for call in bot.send_message.call_args_list:
-                if "💰 Click below to set price:" in call[1].get("text", ""):
-                    price_button_call = call
-                    break
+            client_calls = [
+                c for c in bot.send_message.call_args_list
+                if c[1].get("chat_id") == -100111222
+            ]
+            self.assertEqual(len(client_calls), 0)
+            mock_update_price.assert_not_called()
 
-            self.assertIsNotNone(price_button_call)
-            markup = price_button_call[1]["reply_markup"]
-            self.assertEqual(markup.inline_keyboard[0][0].text, "💰 Price: $80")
-            self.assertEqual(markup.inline_keyboard[0][0].callback_data, "price_set:201")
-
-        # Now test Category B order -> MUST NOT attach price button
-        order_cat_b = Order(
-            id=202,
-            email="cat_b@example.com",
+    async def test_category_b_delivery_unaffected(self):
+        """Category B delivery must NEVER send a price message or price button."""
+        img = Image(id=5, telegram_file_id="file_catb", file_type="photo")
+        order = Order(
+            id=305,
+            email="catb@example.com",
             package="10800 CP",
             category="B",
             client_chat_id=-100111222,
-            original_message_id=602,
+            original_message_id=705,
             status="Pending",
+            price=None,
+            price_msg_id=None,
             images=[img]
         )
-        bot_b = MagicMock()
-        bot_b.send_media_group = AsyncMock(return_value=[MagicMock(message_id=890)])
-        bot_b.send_message = AsyncMock(return_value=MagicMock(message_id=891))
-        bot_b.set_message_reaction = AsyncMock(return_value=True)
 
-        with patch("delivery.get_order_by_id", AsyncMock(return_value=order_cat_b)), \
+        bot = MagicMock()
+        bot.send_media_group = AsyncMock(return_value=[MagicMock(message_id=887)])
+        bot.send_message = AsyncMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        with patch("delivery.get_order_by_id", AsyncMock(return_value=order)), \
              patch("delivery.mark_order_delivered", AsyncMock()), \
+             patch("delivery.update_order_price", AsyncMock()) as mock_update_price, \
              patch("delivery.CLIENT_GROUPS_CACHE", {-100111222: "B"}), \
              patch("delivery.BOT_SETTINGS", {"source_group_id": -100111222, "delivery_group_id": -100333444}):
 
-            await deliver_order_by_id(bot=bot_b, order_id=202)
+            res = await deliver_order_by_id(bot=bot, order_id=305)
+            self.assertTrue(res)
 
-            for call in bot_b.send_message.call_args_list:
-                self.assertNotIn("💰 Click below to set price:", call[1].get("text", ""))
+            client_calls = [
+                c for c in bot.send_message.call_args_list
+                if c[1].get("chat_id") == -100111222
+            ]
+            self.assertEqual(len(client_calls), 0)
+            mock_update_price.assert_not_called()
+
+    async def test_admin_non_button_price_update(self):
+        """Authorized admin replying to the price message updates price without buttons."""
+        order = Order(
+            id=306,
+            email="cust306@example.com",
+            package="2400 CP",
+            category="A",
+            client_chat_id=-100111222,
+            original_message_id=706,
+            price="$20.50",
+            price_msg_id=555444  # Bot's delivered price message ID
+        )
+
+        reply_to_msg = MagicMock(message_id=555444)
+        message = MagicMock(
+            text="$25",
+            reply_to_message=reply_to_msg
+        )
+        user = MagicMock(id=999888)
+        chat = MagicMock(id=-100111222)
+        update = MagicMock(effective_user=user, effective_message=message, effective_chat=chat)
+
+        sent_updated_msg = MagicMock(message_id=555445)
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=sent_updated_msg)
+        context = MagicMock(bot=bot)
+
+        mock_db_res = MagicMock()
+        mock_db_res.scalar_one_or_none.return_value = order
+
+        mock_db_session = AsyncMock()
+        mock_db_session.execute.return_value = mock_db_res
+
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_db_session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("handlers.is_admin", return_value=True), \
+             patch("handlers.AsyncSessionLocal", return_value=mock_session_ctx), \
+             patch("handlers.get_order_by_id", AsyncMock(return_value=order)), \
+             patch("handlers.update_order_price", AsyncMock()) as mock_update_price:
+
+            await price_input_text_handler(update, context)
+
+            bot.send_message.assert_called_once_with(
+                chat_id=-100111222,
+                text="💰 Price Updated: $25",
+                reply_to_message_id=706
+            )
+            mock_update_price.assert_called_once_with(306, "$25", price_msg_id=555445)
 
 
 if __name__ == "__main__":
