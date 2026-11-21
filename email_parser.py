@@ -6,7 +6,8 @@ Includes extract_last_email helper for Loader caption email overrides.
 
 import re
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
+from config import CATEGORY_A_NORMAL_CP_PRICES, CATEGORY_A_DOUBLE_CP_PRICES
 
 logger = logging.getLogger(__name__)
 
@@ -340,3 +341,75 @@ def extract_login_method(text: Optional[str]) -> Optional[str]:
         if re.search(rf'\b{re.escape(method)}\b', text, re.IGNORECASE):
             return method
     return None
+
+
+def get_category_a_price(package_or_order: Any) -> Optional[str]:
+    """
+    Identifies the Category A price ($) using either the order's original CP package
+    or Double CP combination.
+
+    Normal CP and Double CP are matched separately. A Double CP price is NEVER
+    calculated from its total CP alone.
+
+    Returns price string with dollar sign (e.g. '$80', '$41', '$20.50', '$9', '$4.75', '$1')
+    or None if no matching price exists (enabling manual fallback).
+    """
+    if not package_or_order:
+        return None
+
+    # Handle Order object or string
+    text = ""
+    if hasattr(package_or_order, "package"):
+        text = package_or_order.package or ""
+    elif isinstance(package_or_order, str):
+        text = package_or_order
+    else:
+        text = str(package_or_order)
+
+    text = text.strip()
+    if not text:
+        return None
+
+    # 1. Match Double CP Event combination
+    # Stored format is typically: "Double CP: 8000+8000 (Total: 16000 CP)" or raw "8000+8000" / "8+8"
+    is_double = "double cp" in text.lower() or "+" in text
+    if is_double:
+        # Check canonical combination format first: e.g. "8000+8000", "4000+4000", etc.
+        combo_match = re.search(r'\b(8000\+8000|4000\+4000|2000\+2000|800\+800|400\+400|80\+80)\b', text)
+        if combo_match:
+            combo = combo_match.group(1)
+            # Match strictly against Double CP price table:
+            return CATEGORY_A_DOUBLE_CP_PRICES.get(combo)
+
+        # Fallback to extract_double_cp_package if raw text with shorthands (e.g. "8+8", "4k+4k")
+        extracted_double = extract_double_cp_package(text)
+        if extracted_double:
+            combo = extracted_double["combination"]
+            return CATEGORY_A_DOUBLE_CP_PRICES.get(combo)
+
+        # Strict rule: Double CP must never fall through to Normal CP or match by total CP
+        return None
+
+    # 2. Match Normal CP package
+    # Check for direct integer package (e.g. "10800 CP", "5040", "2400 CP", etc.)
+    match_cp = re.search(r'(?<![.\-+\d])\b(\d+)\s*(?:CP)?\b(?![.\-+\d])', text, re.IGNORECASE)
+    if match_cp:
+        try:
+            val = int(match_cp.group(1))
+            if val in CATEGORY_A_NORMAL_CP_PRICES:
+                return CATEGORY_A_NORMAL_CP_PRICES[val]
+        except ValueError:
+            pass
+
+    # Fallback to extract_normal_cp_package if whole message text was provided
+    extracted_normal = extract_normal_cp_package(text)
+    if extracted_normal:
+        try:
+            val = int(extracted_normal.split()[0])
+            if val in CATEGORY_A_NORMAL_CP_PRICES:
+                return CATEGORY_A_NORMAL_CP_PRICES[val]
+        except (ValueError, IndexError):
+            pass
+
+    return None
+

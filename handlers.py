@@ -28,7 +28,7 @@ from sqlalchemy import update as update_sql, select
 
 from config import Config
 from keywords import contains_order_keyword, is_calculation_summary
-from email_parser import extract_email, extract_order_id, extract_package, validate_order_fields, extract_last_email
+from email_parser import extract_email, extract_order_id, extract_package, validate_order_fields, extract_last_email, get_category_a_price
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -139,8 +139,8 @@ def should_suppress_media_group_warning(order_id: int, media_group_id: Optional[
 
 
 def is_valid_price_string(text: str) -> bool:
-    """Validates price string: exact numeric integers or decimals only (e.g. 15, 15.5, 2500, 2999.99)."""
-    return bool(re.match(r'^\d+(\.\d+)?$', text.strip()))
+    """Validates price string: numeric integers or decimals, optionally preceded by $ (e.g. 15, 15.5, $80, $20.50)."""
+    return bool(re.match(r'^\$?\d+(\.\d+)?$', text.strip()))
 
 
 # ==========================================
@@ -623,7 +623,38 @@ async def price_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 pass
             return
 
-        # Prompt for initial order price
+        # Check for automatic Category A price based on order package or Double CP combo
+        matched_price = get_category_a_price(order.package)
+        if matched_price:
+            new_price_text = f"💰 Price: {matched_price}"
+            reply_target_id = order.original_message_id or query.message.message_id
+            try:
+                sent_price_msg = await context.bot.send_message(
+                    chat_id=order.client_chat_id,
+                    text=new_price_text,
+                    reply_to_message_id=reply_target_id
+                )
+                logger.info(f"[PRICE] Calculator price message posted in Client Group: '{new_price_text}'")
+
+                # Save order price & price_msg_id in DB
+                await update_order_price(order.id, matched_price, price_msg_id=sent_price_msg.message_id)
+
+                # Update inline button to ✏️ Edit Price
+                try:
+                    await query.message.edit_reply_markup(
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
+                    )
+                except Exception:
+                    pass
+
+                await query.answer(f"✅ Price set to {matched_price}")
+                logger.info(f"[PRICE]\nOrder #{order.id}\nPrice set to {matched_price}")
+                return
+            except Exception as e:
+                logger.exception(f"[PRICE] Failed to set automatic price: {e}")
+                # Fall through to manual prompt if automatic send failed
+
+        # Fallback to manual price entry
         try:
             prompt_msg = await context.bot.send_message(
                 chat_id=order.client_chat_id,

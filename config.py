@@ -7,7 +7,7 @@ Fixed Payment Review Group default ID: -1004441603990.
 
 import os
 import logging
-from typing import Set
+from typing import Dict, Set
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,7 +39,25 @@ def safe_float(env_name: str, default: float) -> float:
         return default
 
 
-DEFAULT_KNOWN_CP_PACKAGES: Set[int] = {80, 160, 240, 320, 420, 880, 2400, 5000, 10800, 12000, 24000, 36000, 48000, 60000}
+DEFAULT_KNOWN_CP_PACKAGES: Set[int] = {80, 160, 240, 320, 420, 880, 2400, 5000, 5040, 10800, 12000, 24000, 36000, 48000, 60000}
+
+# Category A CP Price Lists
+CATEGORY_A_NORMAL_CP_PRICES: Dict[int, str] = {
+    10800: "$80",
+    5040: "$41",
+    2400: "$20.50",
+    880: "$9",
+    420: "$4.75",
+    80: "$1",
+}
+
+CATEGORY_A_DOUBLE_CP_PRICES: Dict[str, str] = {
+    "8000+8000": "$80",
+    "4000+4000": "$41",
+    "2000+2000": "$20.50",
+    "800+800": "$9",
+    "400+400": "$4.75",
+}
 
 
 class Config:

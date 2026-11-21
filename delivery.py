@@ -15,7 +15,7 @@ from telegram import Bot, InputMediaPhoto, InputMediaDocument, InlineKeyboardMar
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from config import Config
-from email_parser import extract_last_email
+from email_parser import extract_last_email, get_category_a_price
 from database import (
     BOT_SETTINGS,
     CLIENT_GROUPS_CACHE,
@@ -256,10 +256,12 @@ async def deliver_order_by_id(
     # 5. Category A Only Price Workflow in CLIENT GROUP (client_chat_id & original_message_id)
     order_category = order.category or (CLIENT_GROUPS_CACHE.get(client_chat_id, "A") if client_chat_id else "A")
     if order_category == "A" and client_chat_id:
+        matched_price = get_category_a_price(order.package)
         if order.price:
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Edit Price", callback_data=f"price_edit:{order.id}")]])
         else:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("💰 Price", callback_data=f"price_set:{order.id}")]])
+            button_label = f"💰 Price: {matched_price}" if matched_price else "💰 Price"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(button_label, callback_data=f"price_set:{order.id}")]])
         try:
             await bot.send_message(
                 chat_id=client_chat_id,
