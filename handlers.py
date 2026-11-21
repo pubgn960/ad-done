@@ -28,7 +28,18 @@ from sqlalchemy import update as update_sql, select
 
 from config import Config
 from keywords import contains_order_keyword, is_calculation_summary
-from email_parser import extract_email, extract_order_id, extract_package, validate_order_fields, extract_last_email, get_category_a_price
+from email_parser import (
+    extract_email,
+    extract_order_id,
+    extract_package,
+    extract_valid_cp_package,
+    validate_order_fields,
+    validate_facebook_order,
+    validate_activision_order,
+    is_valid_phone_or_username,
+    extract_last_email,
+    get_category_a_price
+)
 from media_collector import media_collector, user_session_manager
 from delivery import deliver_order_by_id, deliver_images_for_email
 from database import (
@@ -164,11 +175,11 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Check against in-memory BOT_SETTINGS and CLIENT_GROUPS_CACHE (Zero DB SELECT query)
-    is_client_group = (chat.id == BOT_SETTINGS["source_group_id"]) or (chat.id in CLIENT_GROUPS_CACHE)
+    is_client_group = (chat.id == BOT_SETTINGS.get("source_group_id")) or (chat.id in CLIENT_GROUPS_CACHE)
 
     if not is_client_group:
         # Check if chat is a known Loader Group to avoid false warning logs
-        is_known_loader = (chat.id == BOT_SETTINGS["delivery_group_id"]) or any(
+        is_known_loader = (chat.id == BOT_SETTINGS.get("delivery_group_id")) or any(
             l["group_id"] == chat.id for l in LOADERS_CACHE.values()
         )
         if is_known_loader:
@@ -213,18 +224,18 @@ async def source_group_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.info(f"[CLIENT] Calculation summary message ignored. Message ID: {message.message_id}")
         return
 
-    # Strict Order Validation: BOTH valid email AND valid supported Normal or Double CP package are required
+    # Strict Order Validation: Valid Activision (email) OR Facebook (account + password) with supported CP package
     validated = validate_order_fields(text_content)
     if not validated:
         logger.info(
-            f"[DETECTOR] Strict validation failed for message {message.message_id} "
-            f"(valid_email={bool(extract_email(text_content))}, valid_cp=False). Ignored."
+            f"[DETECTOR] Strict validation failed for message {message.message_id}. Ignored."
         )
         return
 
     email = validated["email"]
     package_desc = validated["package"]
-    logger.info(f"[DETECTOR] Valid {validated['order_type']} order detected: email={email}, package={package_desc}")
+    login_method = validated.get("login_method", "Activision")
+    logger.info(f"[DETECTOR] Valid {login_method} {validated['order_type']} order detected: account={email}, package={package_desc}")
     logger.info(f"[PARSER] Package: {package_desc}")
 
     # Determine Group Category ('A' or 'B')
@@ -438,8 +449,18 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
     package_desc = dup_order_record.package or ""
 
     if action == "dup_confirm":
-        # Shared strict validation before creating a duplicate order (works identically for Normal & Double CP)
+        # Shared strict validation before creating a duplicate order (works identically for Activision & Facebook)
         validated_dup = validate_order_fields(f"{email or ''} {package_desc or ''}")
+        if not validated_dup:
+            # Check if email is an existing valid Facebook phone/username and package is valid
+            extracted_pkg = extract_valid_cp_package(package_desc)
+            if email and is_valid_phone_or_username(email) and extracted_pkg:
+                validated_dup = {
+                    "email": email,
+                    "package": extracted_pkg,
+                    "order_type": "double_cp" if "double cp" in extracted_pkg.lower() else "normal_cp",
+                    "login_method": "Facebook",
+                }
         if not validated_dup:
             logger.warning(f"[CLIENT] Duplicate confirm blocked: invalid email/package on Order #{order_id}.")
             return
@@ -506,7 +527,7 @@ async def duplicate_order_callback_handler(update: Update, context: ContextTypes
                 status="Pending",
                 category="A"
             )
-            loader_group_id = BOT_SETTINGS["delivery_group_id"]
+            loader_group_id = BOT_SETTINGS.get("delivery_group_id")
             if loader_group_id and client_chat_id and original_msg_id:
                 try:
                     forwarded_msg = await context.bot.copy_message(

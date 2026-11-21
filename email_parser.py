@@ -225,11 +225,255 @@ def extract_valid_cp_package(text: Optional[str]) -> Optional[str]:
     return extract_normal_cp_package(text)
 
 
-def validate_order_fields(text: Optional[str]) -> Optional[Dict[str, Any]]:
+def is_valid_phone_or_username(val: Optional[str]) -> bool:
     """
-    Shared strict order validator used by both source_group_handler and duplicate_order_callback_handler.
-    Requires BOTH a syntactically valid email AND a supported Normal or Double CP package in the same text.
-    Returns structured dict {'email', 'package', 'order_type', 'combination', 'total_cp'} or None.
+    Validates if a string is a valid phone number, email, or Facebook username.
+    """
+    if not val:
+        return False
+    val = val.strip()
+    # Check email
+    if extract_email(val):
+        return True
+    # Check phone number (7 to 15 digits)
+    digits = re.sub(r'\D', '', val)
+    # A phone number or numeric ID must have 7 to 15 digits and cannot be all zeros
+    if val.isdigit() or (val.startswith("+") and val[1:].isdigit()):
+        if 7 <= len(digits) <= 15 and digits != "0" * len(digits):
+            return True
+        return False
+    if re.match(r'^\+?[\d\s\-()]+$', val):
+        if 7 <= len(digits) <= 15 and digits != "0" * len(digits):
+            return True
+        return False
+    # Check username (alphanumeric, dot, underscore, hyphen, 3-50 chars)
+    # A username must contain at least one letter and cannot be pure numbers
+    if re.match(r'^[A-Za-z0-9._\-]{3,50}$', val):
+        if any(c.isalpha() for c in val):
+            reserved = {
+                "facebook", "fb", "password", "pass", "activision", "login",
+                "order", "fast", "recharge", "codm", "cp", "code", "codes",
+                "backup", "auth", "otp", "2fa", "number", "num", "phone",
+                "mobile", "contact", "user", "username", "account", "email",
+                "price", "item", "package", "id", "uid", "name"
+            }
+            if val.lower() not in reserved:
+                return True
+    return False
+
+
+def extract_facebook_password(text: Optional[str]) -> Optional[str]:
+    """
+    Extracts the password value for a Facebook order.
+    Returns the password token if present, non-empty, and not a CP package or keyword.
+    """
+    if not text:
+        return None
+    match = re.search(r'\b(?:pass(?:word)?|pwd|psw|pas)\s*[:=\-]?\s*([^\r\n]+)', text, re.IGNORECASE)
+    if not match:
+        return None
+    val_line = match.group(1).strip()
+    if not val_line:
+        return None
+    # Cut off if subsequent labels appear on the same line (e.g. Code:, 2FA:)
+    inline_cutoff = re.split(
+        r'\b(?:code|codes|backup|2fa|otp|auth|pin|price|rs|pkr|usd)\b',
+        val_line,
+        maxsplit=1,
+        flags=re.IGNORECASE
+    )
+    candidate_pass = inline_cutoff[0].strip().rstrip(",;:")
+    if not candidate_pass:
+        return None
+    token = candidate_pass.split()[0].rstrip(",;:")
+    if not token:
+        return None
+    # If the token itself is a CP package (e.g. "2000+2000", "5040", "5040CP"), password was omitted
+    if extract_double_cp_package(token) or extract_normal_cp_package(token):
+        return None
+    if extract_double_cp_package(candidate_pass) or extract_normal_cp_package(candidate_pass):
+        return None
+    if token.lower().rstrip(":") in {"code", "codes", "2fa", "otp", "backup", "pin"}:
+        return None
+    return token
+
+
+def extract_facebook_account(text: Optional[str]) -> Optional[str]:
+    """
+    Extracts a valid Facebook account identifier (phone number, email, or username)
+    from a customer order message.
+    Ignores password lines, verification code lines, and CP packages.
+    """
+    if not text:
+        return None
+
+    # 1. Check labeled fields (e.g. Phone: ..., Number: ..., User: ..., ID: ...)
+    label_patterns = [
+        re.compile(
+            r'^\s*(?:phone(?:\s*number)?|mobile(?:\s*number)?|number|num|no\.?|contact|cell|tel)\s*[:=\-]\s*([^\r\n]+)',
+            re.IGNORECASE | re.MULTILINE
+        ),
+        re.compile(
+            r'^\s*(?:user(?:name)?|acc(?:ount)?|fb\s*id|uid|id)\s*[:=\-]\s*([^\r\n]+)',
+            re.IGNORECASE | re.MULTILINE
+        ),
+        re.compile(
+            r'^\s*email\s*[:=\-]\s*([^\r\n]+)',
+            re.IGNORECASE | re.MULTILINE
+        ),
+    ]
+
+    for pat in label_patterns:
+        match = pat.search(text)
+        if match:
+            candidate = match.group(1).strip()
+            # Cut off inline subsequent labels like Pass: or Code:
+            inline_cutoff = re.split(
+                r'\b(?:pass(?:word)?|pwd|psw|pas|code|codes|2fa|otp|backup|price)\b',
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE
+            )
+            candidate = inline_cutoff[0].strip().rstrip(",;:")
+            if not candidate:
+                continue
+
+            # If candidate is an email
+            cand_email = extract_email(candidate)
+            if cand_email:
+                return cand_email
+
+            tokens = candidate.split()
+            cand_token = tokens[0].rstrip(",;:")
+
+            combined_digits = re.sub(r'\D', '', candidate)
+            cand_token_digits = re.sub(r'\D', '', cand_token)
+
+            if is_valid_phone_or_username(candidate):
+                if re.match(r'^\+?[\d\s\-()]+$', candidate):
+                    clean_phone = ("+" if candidate.startswith("+") else "") + combined_digits
+                    return clean_phone
+                return candidate
+            elif is_valid_phone_or_username(cand_token):
+                if cand_token.isdigit() or cand_token.startswith("+"):
+                    clean_phone = ("+" if cand_token.startswith("+") else "") + cand_token_digits
+                    return clean_phone
+                return cand_token
+
+    # 2. Check unlabeled lines
+    for line in text.splitlines():
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        # Skip login method headers (e.g. "Facebook", "FB", "Login: Facebook")
+        if re.match(r'^(?:login\s*[:=\-]?\s*)?(?:facebook|fb)\b', line_clean, re.IGNORECASE):
+            continue
+        # Skip labeled field lines (already processed by label_patterns above)
+        if re.match(r'^(?:phone(?:\s*number)?|mobile|number|num|no\.?|contact|cell|tel|user(?:name)?|acc(?:ount)?|email|fb\s*id|uid|id)\s*[:=\-]', line_clean, re.IGNORECASE):
+            continue
+        # Skip password lines
+        if re.search(r'\b(?:pass(?:word)?|pwd|psw|pas)\b', line_clean, re.IGNORECASE):
+            continue
+        # Skip verification code / 2FA lines
+        if re.search(r'\b(?:code|codes|backup|2fa|otp|auth|pin)\b', line_clean, re.IGNORECASE):
+            continue
+        # Skip title / header lines
+        if re.match(r'^(?:fast\s*recharge|\bcodm\b|order\b)', line_clean, re.IGNORECASE):
+            continue
+        # Skip CP package lines
+        if extract_double_cp_package(line_clean) or extract_normal_cp_package(line_clean):
+            continue
+        # Skip price lines
+        if re.search(r'\b(?:price|rs|pkr|usd)\b', line_clean, re.IGNORECASE):
+            continue
+
+        # Check if line contains an email
+        line_email = extract_email(line_clean)
+        if line_email:
+            return line_email
+
+        # Check first token or line for phone number
+        tokens = line_clean.split()
+        cand_token = tokens[0].rstrip(",;:")
+        if is_valid_phone_or_username(line_clean) and re.match(r'^\+?[\d\s\-()]+$', line_clean):
+            digits = re.sub(r'\D', '', line_clean)
+            clean_phone = ("+" if line_clean.startswith("+") else "") + digits
+            return clean_phone
+        elif is_valid_phone_or_username(cand_token):
+            if cand_token.isdigit() or cand_token.startswith("+"):
+                digits = re.sub(r'\D', '', cand_token)
+                clean_phone = ("+" if cand_token.startswith("+") else "") + digits
+                return clean_phone
+            return cand_token
+
+    return None
+
+
+def validate_facebook_order(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Strict order validator for Facebook CODM orders.
+    Requires:
+    1. Facebook login method identifier ('Facebook' or 'FB').
+    2. Must NOT be an Activision order.
+    3. Password field present with non-empty password value.
+    4. Valid Facebook username or phone number (email not required).
+    5. Supported Normal CP or Double CP package.
+    Returns structured order dict or None if invalid.
+    """
+    if not text:
+        return None
+
+    # 1. Require Facebook login method identifier
+    has_fb_method = bool(re.search(r'\b(?:facebook|fb)\b', text, re.IGNORECASE))
+    if not has_fb_method:
+        return None
+
+    # 2. Never classify Activision orders as Facebook
+    if re.search(r'\bactivision\b', text, re.IGNORECASE):
+        return None
+
+    # 3. Require password field with non-empty password value
+    password = extract_facebook_password(text)
+    if not password:
+        return None
+
+    # 4. Require valid Facebook account (username or phone number)
+    account = extract_facebook_account(text)
+    if not account or not is_valid_phone_or_username(account):
+        return None
+
+    # 5. Require supported Double CP or Normal CP package
+    double_cp = extract_double_cp_package(text)
+    if double_cp:
+        return {
+            "email": account,
+            "package": double_cp["formatted"],
+            "order_type": "double_cp",
+            "combination": double_cp["combination"],
+            "total_cp": double_cp["total_cp"],
+            "login_method": "Facebook",
+        }
+
+    normal_cp = extract_normal_cp_package(text)
+    if normal_cp:
+        return {
+            "email": account,
+            "package": normal_cp,
+            "order_type": "normal_cp",
+            "combination": None,
+            "total_cp": int(normal_cp.split()[0]),
+            "login_method": "Facebook",
+        }
+
+    return None
+
+
+def validate_activision_order(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Strict order validator for Activision CODM orders (email-based).
+    Preserves existing Activision email validation exactly as it is.
+    Requires both a syntactically valid email AND a supported Normal or Double CP package.
+    Returns structured dict or None.
     """
     if not text:
         return None
@@ -246,6 +490,7 @@ def validate_order_fields(text: Optional[str]) -> Optional[Dict[str, Any]]:
             "order_type": "double_cp",
             "combination": double_cp["combination"],
             "total_cp": double_cp["total_cp"],
+            "login_method": "Activision",
         }
 
     normal_cp = extract_normal_cp_package(text)
@@ -256,7 +501,30 @@ def validate_order_fields(text: Optional[str]) -> Optional[Dict[str, Any]]:
             "order_type": "normal_cp",
             "combination": None,
             "total_cp": int(normal_cp.split()[0]),
+            "login_method": "Activision",
         }
+
+    return None
+
+
+def validate_order_fields(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Unified strict order validator used by both source_group_handler and duplicate_order_callback_handler.
+    Preserves Activision email validation and adds separate Facebook login order validation.
+    """
+    if not text:
+        return None
+
+    # 1. Check Facebook order path first if Facebook login identifier is present and not Activision
+    if re.search(r'\b(?:facebook|fb)\b', text, re.IGNORECASE) and not re.search(r'\bactivision\b', text, re.IGNORECASE):
+        fb_order = validate_facebook_order(text)
+        if fb_order:
+            return fb_order
+
+    # 2. Check Activision / standard email order path
+    activision_order = validate_activision_order(text)
+    if activision_order:
+        return activision_order
 
     return None
 
@@ -331,12 +599,16 @@ LOGIN_METHODS: List[str] = ["Activision", "Facebook", "Google", "Apple", "Line",
 
 def extract_login_method(text: Optional[str]) -> Optional[str]:
     """
-    Extracts the account login method (e.g. 'Activision') from an order message.
+    Extracts the account login method (e.g. 'Activision', 'Facebook') from an order message.
     Returns the canonical method name, or None if no known method is mentioned.
     Parse-only helper: the value is not stored in the database.
     """
     if not text:
         return None
+    if re.search(r'\bactivision\b', text, re.IGNORECASE):
+        return "Activision"
+    if re.search(r'\b(?:facebook|fb)\b', text, re.IGNORECASE):
+        return "Facebook"
     for method in LOGIN_METHODS:
         if re.search(rf'\b{re.escape(method)}\b', text, re.IGNORECASE):
             return method
